@@ -37,7 +37,7 @@ unsigned long lastDebounceTime = 0;
 unsigned long debounceDelay = 50;
 bool lastButtonState = HIGH;
 int photoCounter = 0;
-bool bluetoothEnabled = true;
+bool bluetoothEnabled = false;
 bool sdCardReady = false;
 String lastPhotoSDpath = "";
 
@@ -154,7 +154,7 @@ bool setupCameraOptimized() {
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 10000000;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.fb_count = 2;
+  config.fb_count = 1;
 
   // Configuración OPTIMIZADA - Menos calidad para fotos más pequeñas
   config.pixel_format = PIXFORMAT_JPEG;
@@ -278,8 +278,8 @@ bool sendPhotoDirectNoCopy(const uint8_t* imageData, size_t imageSize) {
 
   // Enviar datos DIRECTAMENTE desde imageData - SIN COPIA
   size_t sent = 0;
-  // const size_t CHUNK_SIZE = 512; // Chunks más pequeños para memoria baja
-   const size_t CHUNK_SIZE = 1024; // Chunks medio para prueba de memoria
+  const size_t CHUNK_SIZE = 512; // Chunks más pequeños para memoria baja
+   // const size_t CHUNK_SIZE = 1024; // Chunks medio para prueba de memoria
   //const size_t CHUNK_SIZE = 2048; // Chunks MAxima para prueba, evitar fallas de envio
 
 
@@ -613,7 +613,7 @@ void loop() {
       buttonPressed = true;
       SerialBT.println("🔘 Botón físico presionado");
       Serial.println("🔘 Botón físico presionado");
-      captureProcessAndSend(true, true); //guarda en SD y manda al server
+      captureProcessAndSend(true, false); //guarda en SD y manda al server
     }
     else if (currentButtonState == HIGH && buttonPressed) {
       buttonPressed = false;
