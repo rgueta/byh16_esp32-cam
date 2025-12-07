@@ -1,0 +1,423 @@
+#include "esp_camera.h"
+#include "FS.h"
+#include "SD_MMC.h"
+#include "BluetoothSerial.h"
+#include <WiFi.h>
+#include <HTTPClient.h>
+
+// Configuración de pines para AI-THINKER ESP32-CAM
+#define CAMERA_MODEL_AI_THINKER
+#include "camera_pins.h"
+
+// Pin del botón físico
+#define BUTTON_PIN 12
+
+// Configuración WiFi
+const char* ssid = "FamGuEst_2.4";
+const char* password = "l0l1t@..:)";
+const char* serverURL = "http://192.168.1.170:5000/upload";
+const char* authToken = "Bearer 1234";
+
+// Objeto Bluetooth
+BluetoothSerial SerialBT;
+
+// Variables globales
+bool buttonPressed = false;
+unsigned long lastDebounceTime = 0;
+unsigned long debounceDelay = 50;
+bool lastButtonState = HIGH;
+int photoCounter = 0;
+bool bluetoothEnabled = true;
+bool sdCardReady = false;
+
+const char* deviceName = "ESP32-CAM-Camera";
+
+void setupWiFi();
+bool setupCamera();
+bool setupSDCard();
+
+
+void setup() {
+  Serial.begin(115200);
+  Serial.setDebugOutput(true);
+  Serial.println("\n=== ESP32-CAM OPTIMIZADO ===");
+
+  // Mostrar memoria inicial
+  Serial.printf("💾 Memoria libre inicial: %d bytes\n", ESP.getFreeHeap());
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  // Bluetooth
+  if (bluetoothEnabled) {
+    if (!SerialBT.begin(deviceName)) {
+      Serial.println("❌ Error en Bluetooth");
+      bluetoothEnabled = false;
+    } else {
+      Serial.printf("✅ Bluetooth: %s\n", deviceName);
+    }
+  }
+
+  // WiFi
+  setupWiFi();
+
+  // Cámara con PSRAM
+  Serial.println("📷 Inicializando cámara con PSRAM...");
+  if (!setupCamera()) {
+    Serial.println("❌ Error en cámara!");
+    return;
+  }
+
+  // SD Card
+  Serial.println("💾 Inicializando SD...");
+  sdCardReady = setupSDCard();
+
+  Serial.println("\n🎯 SISTEMA LISTO");
+  Serial.printf("💾 Memoria libre: %d bytes\n", ESP.getFreeHeap());
+  Serial.printf("🌐 Servidor: %s\n", serverURL);
+}
+
+void setupWiFi() {
+  Serial.printf("📡 Conectando a: %s\n", ssid);
+
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(true);
+
+  WiFi.begin(ssid, password);
+
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(1000);
+    attempts++;
+    Serial.print(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n✅ WiFi conectado!");
+    Serial.printf("📶 IP: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("💾 Memoria después de WiFi: %d bytes\n", ESP.getFreeHeap());
+  } else {
+    Serial.println("\n❌ Error en WiFi");
+  }
+}
+
+bool setupCamera() {
+  camera_config_t config;
+
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sccb_sda = SIOD_GPIO_NUM;
+  config.pin_sccb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+
+  // Configuración OPTIMIZADA
+  config.pixel_format = PIXFORMAT_JPEG;
+  // config.frame_size = FRAMESIZE_VGA; // 640x480
+  // config.jpeg_quality = 15; // Calidad media-baja
+  config.frame_size = FRAMESIZE_XGA; // 1024x768 - Balance entre calidad y tamaño
+  config.jpeg_quality = 10; // Calidad media (0-63, menor es mejor)
+
+  config.fb_count = 1;
+  config.fb_location = CAMERA_FB_IN_PSRAM;
+
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("❌ Error cámara: 0x%x\n", err);
+    return false;
+  }
+
+  Serial.printf("✅ Cámara lista. Memoria: %d bytes\n", ESP.getFreeHeap());
+  return true;
+}
+
+bool setupSDCard() {
+  if (SD_MMC.begin("/sdcard", true)) {
+    if (SD_MMC.cardType() != CARD_NONE) {
+      if(!SD_MMC.exists("/fotos")){
+        SD_MMC.mkdir("/fotos");
+      }
+      Serial.println("✅ SD lista");
+      return true;
+    }
+  }
+  Serial.println("❌ SD no disponible");
+  return false;
+}
+
+void gentleMemoryCleanup() {
+  int initialMemory = ESP.getFreeHeap();
+  Serial.printf("🧹 Limpieza suave de memoria... %d bytes -> ", initialMemory);
+
+  // Métodos suaves para liberar memoria sin desconectar WiFi
+  delay(100);
+
+  // Forzar recolección de basura
+  if (ESP.getFreeHeap() < 30000) {
+    // Reiniciar Bluetooth si está activo y usando mucha memoria
+    if (bluetoothEnabled) {
+      SerialBT.end();
+      delay(100);
+      SerialBT.begin(deviceName);
+      delay(100);
+    }
+  }
+
+  Serial.printf("%d bytes\n", ESP.getFreeHeap());
+}
+
+String lastPhotoPath = "";
+
+bool sendPhotoToServer(const uint8_t* imageData, size_t imageSize, const String& filename) {
+  Serial.println("\n📡 INICIANDO ENVÍO DE FOTO");
+  Serial.printf("📏 Tamaño: %d bytes\n", imageSize);
+  Serial.printf("💾 Memoria antes: %d bytes\n", ESP.getFreeHeap());
+
+  // Verificar WiFi
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("❌ WiFi desconectado");
+    return false;
+  }
+
+  // Limpieza suave si la memoria es baja
+  if (ESP.getFreeHeap() < 35000) {
+    gentleMemoryCleanup();
+  }
+
+  HTTPClient http;
+  http.setTimeout(45000); // Timeout extendido
+  http.setConnectTimeout(20000);
+  http.setReuse(false);
+
+  Serial.println("🔗 Conectando al servidor...");
+
+  if (!http.begin(serverURL)) {
+    Serial.println("❌ Error en http.begin()");
+    return false;
+  }
+
+  // Headers
+  http.addHeader("Content-Type", "application/octet-stream");
+  http.addHeader("Authorization", authToken);
+  http.addHeader("X-Filename", filename);
+
+  Serial.println("📤 Enviando datos...");
+
+  // Preparar datos
+  uint8_t* postData = (uint8_t*)malloc(imageSize);
+  if (!postData) {
+    Serial.println("❌ Error de memoria en malloc");
+    http.end();
+    return false;
+  }
+
+  memcpy(postData, imageData, imageSize);
+
+  // Enviar con manejo de errores
+  int httpResponseCode = http.POST(postData, imageSize);
+  free(postData);
+
+  Serial.printf("📡 Código respuesta: %d\n", httpResponseCode);
+
+  if (httpResponseCode > 0) {
+    String response = http.getString();
+    Serial.printf("✅ ÉXITO! Respuesta: %s\n", response.c_str());
+    http.end();
+    return true;
+  } else {
+    Serial.printf("❌ ERROR: %s\n", http.errorToString(httpResponseCode).c_str());
+    http.end();
+    return false;
+  }
+}
+
+void takePhoto(bool upload = false) {
+  photoCounter++;
+  Serial.printf("\n📸 TOMANDO FOTO #%d\n", photoCounter);
+  Serial.printf("💾 Memoria antes de captura: %d bytes\n", ESP.getFreeHeap());
+
+  // Limpieza suave antes de capturar
+  if (ESP.getFreeHeap() < 40000) {
+    gentleMemoryCleanup();
+  }
+
+  // Capturar foto
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("❌ Error capturando foto");
+    return;
+  }
+
+  Serial.printf("✅ Foto capturada: %d bytes\n", fb->len);
+  Serial.printf("💾 Memoria después de captura: %d bytes\n", ESP.getFreeHeap());
+
+  // Guardar en SD
+  String filename = "/fotos/foto_" + String(photoCounter) + "_" + String(millis()) + ".jpg";
+  File file = SD_MMC.open(filename, FILE_WRITE);
+  if (file) {
+    size_t written = file.write(fb->buf, fb->len);
+    file.close();
+
+    if (written == fb->len) {
+      lastPhotoPath = filename;
+      Serial.println("💾 Guardada en SD");
+
+      if (bluetoothEnabled) {
+        SerialBT.printf("✅ Foto #%d guardada (%d bytes)\n", photoCounter, fb->len);
+      }
+    }
+  }
+
+  // Enviar al servidor si se solicita
+  if (upload) {
+    Serial.println("🚀 Preparando envío al servidor...");
+    delay(500); // Pequeña pausa
+
+    if (sendPhotoToServer(fb->buf, fb->len, filename)) {
+      Serial.println("🎉 Foto enviada al servidor!");
+      if (bluetoothEnabled) {
+        SerialBT.println("🎉 Foto enviada al servidor!");
+      }
+    } else {
+      Serial.println("❌ Error enviando foto");
+      if (bluetoothEnabled) {
+        SerialBT.println("❌ Error enviando foto");
+      }
+    }
+  }
+
+  // Liberar frame buffer inmediatamente
+  esp_camera_fb_return(fb);
+
+  Serial.printf("💾 Memoria final: %d bytes\n", ESP.getFreeHeap());
+}
+
+void sendStatus() {
+  if (!bluetoothEnabled) return;
+
+  SerialBT.println("\n=== ESTADO ===");
+  SerialBT.printf("📷 Fotos: %d\n", photoCounter);
+  SerialBT.printf("💾 SD: %s\n", sdCardReady ? "✅" : "❌");
+  SerialBT.printf("📡 WiFi: %s\n", WiFi.status() == WL_CONNECTED ? "✅" : "❌");
+  SerialBT.printf("💻 Memoria: %d bytes\n", ESP.getFreeHeap());
+  SerialBT.printf("🌐 Servidor: %s\n", serverURL);
+}
+
+void processBluetoothCommand(String command) {
+  command.toUpperCase();
+  command.trim();
+
+  Serial.printf("📱 Comando: %s\n", command.c_str());
+
+  if (command == "FOTO") {
+    if (bluetoothEnabled) SerialBT.println("📸 Tomando foto...");
+    takePhoto(false);
+  }
+  else if (command == "ENVIAR") {
+    if (bluetoothEnabled) SerialBT.println("🚀 Tomando y enviando foto...");
+    takePhoto(true);
+  }
+  else if (command == "POST" && lastPhotoPath != "") {
+    if (bluetoothEnabled) SerialBT.println("📡 Enviando última foto...");
+
+    File file = SD_MMC.open(lastPhotoPath.c_str(), FILE_READ);
+    if (!file) {
+      if (bluetoothEnabled) SerialBT.println("❌ Error abriendo foto");
+      return;
+    }
+
+    size_t fileSize = file.size();
+    uint8_t* buffer = (uint8_t*)malloc(fileSize);
+    if (!buffer) {
+      if (bluetoothEnabled) SerialBT.println("❌ Error de memoria");
+      file.close();
+      return;
+    }
+
+    file.read(buffer, fileSize);
+    file.close();
+
+    bool success = sendPhotoToServer(buffer, fileSize, lastPhotoPath);
+    free(buffer);
+
+    if (bluetoothEnabled) {
+      SerialBT.println(success ? "✅ Foto enviada" : "❌ Error enviando");
+    }
+  }
+  else if (command == "STATUS") {
+    sendStatus();
+  }
+  else if (command == "MEMORIA") {
+    if (bluetoothEnabled) {
+      SerialBT.printf("💻 Memoria libre: %d bytes\n", ESP.getFreeHeap());
+    }
+  }
+  else if (command == "LIMPIAR") {
+    gentleMemoryCleanup();
+    if (bluetoothEnabled) SerialBT.println("🧹 Memoria liberada");
+  }
+  else if (command == "WIFI") {
+    if (bluetoothEnabled) SerialBT.println("📡 Reconectando WiFi...");
+    WiFi.reconnect();
+    delay(2000);
+    if (bluetoothEnabled) {
+      SerialBT.println(WiFi.status() == WL_CONNECTED ? "✅ WiFi reconectado" : "❌ Error WiFi");
+    }
+  }
+  else {
+    if (bluetoothEnabled) {
+      SerialBT.println("❌ Comando no reconocido");
+      SerialBT.println("Comandos: FOTO, ENVIAR, POST, STATUS, MEMORIA, LIMPIAR, WIFI");
+    }
+  }
+}
+
+void loop() {
+  // Procesar comandos Bluetooth
+  if (bluetoothEnabled && SerialBT.available()) {
+    String command = SerialBT.readString();
+    command.trim();
+    processBluetoothCommand(command);
+  }
+
+  // Control del botón físico
+  bool currentButtonState = digitalRead(BUTTON_PIN);
+
+  if (currentButtonState != lastButtonState) {
+    lastDebounceTime = millis();
+  }
+
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    if (currentButtonState == LOW && !buttonPressed) {
+      buttonPressed = true;
+      Serial.println("🔘 Botón físico presionado");
+      takePhoto(false);
+    }
+    else if (currentButtonState == HIGH && buttonPressed) {
+      buttonPressed = false;
+    }
+  }
+
+  lastButtonState = currentButtonState;
+
+  // Mantener conexión WiFi
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("🔄 Reconectando WiFi...");
+    WiFi.reconnect();
+    delay(2000);
+  }
+
+  delay(50);
+}

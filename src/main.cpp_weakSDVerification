@@ -1,0 +1,325 @@
+#include "esp_camera.h"
+#include "FS.h"
+#include "SD_MMC.h"
+#include "BluetoothSerial.h"
+
+// Configuración de pines para AI-THINKER ESP32-CAM
+#define CAMERA_MODEL_AI_THINKER
+#include "camera_pins.h"
+
+// Pin del botón físico
+#define BUTTON_PIN 12
+
+// Objeto Bluetooth
+BluetoothSerial SerialBT;
+
+// Variables globales
+bool buttonPressed = false;
+unsigned long lastDebounceTime = 0;
+unsigned long debounceDelay = 50;
+bool lastButtonState = HIGH;
+int photoCounter = 0;
+bool bluetoothEnabled = true;
+// pics destination: SD           o
+
+// Nombre del dispositivo Bluetooth
+const char* deviceName = "ESP32-CAM-Camera";
+
+bool setupCamera();
+bool setupSDCard();
+void takePhoto();
+
+void setup() {
+  Serial.begin(115200);
+  Serial.setDebugOutput(true);
+  Serial.println("\n=== INICIANDO ESP32-CAM CON BLUETOOTH ===");
+
+  // Configurar pin del botón
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  Serial.printf("✅ Botón físico configurado en GPIO %d\n", BUTTON_PIN);
+
+  // Inicializar Bluetooth
+  if (bluetoothEnabled) {
+    if (!SerialBT.begin(deviceName)) {
+      Serial.println("❌ Error inicializando Bluetooth");
+      bluetoothEnabled = false;
+    } else {
+      Serial.printf("✅ Bluetooth inicializado: %s\n", deviceName);
+      Serial.println("📱 Conéctate desde tu celular para controlar la cámara");
+    }
+  }
+
+  // Inicializar cámara
+  Serial.println("📷 Inicializando cámara...");
+  if (!setupCamera()) {
+    Serial.println("❌ Error al inicializar la cámara!");
+    return;
+  }
+
+  // Inicializar tarjeta SD
+  Serial.println("💾 Inicializando tarjeta SD...");
+  if (!setupSDCard()) {
+    Serial.println("❌ Error al inicializar la SD!");
+    return;
+  }
+
+  Serial.println("\n🎯 SISTEMA LISTO - MÉTODOS DE CONTROL:");
+  Serial.println("1. 🔘 Botón físico en GPIO12");
+  Serial.println("2. 📱 Bluetooth: Envía 'CAPTURE' o 'FOTO'");
+  Serial.println("3. 📱 Bluetooth: Envía 'STATUS' para información");
+  Serial.println("============================================\n");
+}
+
+bool setupCamera() {
+  camera_config_t config;
+
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sccb_sda = SIOD_GPIO_NUM;
+  config.pin_sccb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+
+  // Configuración para máxima calidad
+  config.pixel_format = PIXFORMAT_JPEG;
+  config.frame_size = FRAMESIZE_UXGA; // 1600x1200 - máxima resolución
+  config.jpeg_quality = 10; // 0-63 (más bajo = mejor calidad)
+  config.fb_count = 1;
+
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("❌ Error inicializando cámara: 0x%x\n", err);
+    return false;
+  }
+
+  // Ajustes adicionales para mejorar calidad
+  sensor_t *s = esp_camera_sensor_get();
+  if (s != NULL) {
+    s->set_brightness(s, 0);
+    s->set_contrast(s, 0);
+    s->set_saturation(s, 0);
+    s->set_special_effect(s, 0);
+    s->set_whitebal(s, 1);
+    s->set_awb_gain(s, 1);
+    s->set_wb_mode(s, 0);
+    s->set_exposure_ctrl(s, 1);
+    s->set_aec2(s, 0);
+    s->set_ae_level(s, 0);
+    s->set_aec_value(s, 300);
+    s->set_gain_ctrl(s, 1);
+    s->set_agc_gain(s, 0);
+    s->set_gainceiling(s, (gainceiling_t)0);
+    s->set_bpc(s, 0);
+    s->set_wpc(s, 1);
+    s->set_raw_gma(s, 1);
+    s->set_lenc(s, 1);
+    s->set_hmirror(s, 0);
+    s->set_vflip(s, 0);
+    s->set_dcw(s, 1);
+    s->set_colorbar(s, 0);
+  }
+
+  Serial.println("✅ Cámara inicializada con máxima calidad");
+  return true;
+}
+
+bool setupSDCard() {
+  Serial.println("Montando sistema de archivos SD_MMC...");
+
+  if (!SD_MMC.begin()) {
+    Serial.println("❌ Error montando SD_MMC");
+    return false;
+  }
+
+  uint8_t cardType = SD_MMC.cardType();
+  if (cardType == CARD_NONE) {
+    Serial.println("❌ No se detectó tarjeta SD");
+    return false;
+  }
+
+  Serial.print("✅ Tipo de tarjeta SD: ");
+  switch (cardType) {
+    case CARD_MMC: Serial.println("MMC"); break;
+    case CARD_SD: Serial.println("SDSC"); break;
+    case CARD_SDHC: Serial.println("SDHC"); break;
+    default: Serial.println("Desconocido"); break;
+  }
+
+  uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
+  uint64_t usedBytes = SD_MMC.usedBytes() / (1024 * 1024);
+  uint64_t freeBytes = (SD_MMC.totalBytes() - SD_MMC.usedBytes()) / (1024 * 1024);
+
+  Serial.printf("📊 Tamaño total: %lluMB\n", cardSize);
+  Serial.printf("📊 Espacio usado: %lluMB\n", usedBytes);
+  Serial.printf("📊 Espacio libre: %lluMB\n", freeBytes);
+
+  // Crear directorio de fotos si no existe
+  if(!SD_MMC.exists("/fotos")){
+    SD_MMC.mkdir("/fotos");
+    Serial.println("📁 Directorio /fotos creado");
+  }
+
+  return true;
+}
+
+void takePhoto() {
+  photoCounter++;
+  Serial.printf("\n=== TOMANDO FOTO #%d ===\n", photoCounter);
+
+  if (bluetoothEnabled) {
+    SerialBT.printf("📸 Capturando foto #%d...\n", photoCounter);
+  }
+
+  // Obtener frame de la cámara
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("❌ Error capturando frame de cámara");
+    if (bluetoothEnabled) {
+      SerialBT.println("❌ Error capturando foto");
+    }
+    return;
+  }
+
+  Serial.printf("✅ Frame capturado - Tamaño: %d bytes\n", fb->len);
+
+  // Generar nombre único para el archivo
+  String path = "/fotos/foto_" + String(photoCounter) + "_" + String(millis()) + ".jpg";
+  Serial.printf("💾 Guardando como: %s\n", path.c_str());
+
+  // Guardar en SD
+  fs::FS &fs = SD_MMC;
+  File file = fs.open(path.c_str(), FILE_WRITE);
+
+  if (!file) {
+    Serial.println("❌ Error abriendo archivo en SD");
+    if (bluetoothEnabled) {
+      SerialBT.println("❌ Error guardando en SD");
+    }
+    esp_camera_fb_return(fb);
+    return;
+  }
+
+  bool writeResult = file.write(fb->buf, fb->len);
+  file.close();
+  esp_camera_fb_return(fb);
+
+  if (writeResult) {
+    Serial.printf("✅✅✅ FOTO GUARDADA: %s (%d bytes)\n", path.c_str(), fb->len);
+
+    // Mostrar espacio libre actualizado
+    uint64_t freeBytes = (SD_MMC.totalBytes() - SD_MMC.usedBytes()) / (1024 * 1024);
+    Serial.printf("💾 Espacio libre en SD: %lluMB\n", freeBytes);
+
+    if (bluetoothEnabled) {
+      SerialBT.printf("✅ Foto #%d guardada: %s\n", photoCounter, path.c_str());
+      SerialBT.printf("📏 Tamaño: %d bytes\n", fb->len);
+      SerialBT.printf("💾 Espacio libre: %lluMB\n", freeBytes);
+    }
+  } else {
+    Serial.println("❌ Error escribiendo archivo en SD");
+    if (bluetoothEnabled) {
+      SerialBT.println("❌ Error guardando foto");
+    }
+  }
+
+  Serial.println("=== FOTO COMPLETADA ===\n");
+}
+
+void sendStatus() {
+  if (!bluetoothEnabled) return;
+
+  uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
+  uint64_t usedBytes = SD_MMC.usedBytes() / (1024 * 1024);
+  uint64_t freeBytes = (SD_MMC.totalBytes() - SD_MMC.usedBytes()) / (1024 * 1024);
+
+  SerialBT.println("\n=== ESTADO DEL SISTEMA ===");
+  SerialBT.printf("📷 Fotos tomadas: %d\n", photoCounter);
+  SerialBT.printf("💾 Tamaño SD: %lluMB\n", cardSize);
+  SerialBT.printf("📊 Espacio usado: %lluMB\n", usedBytes);
+  SerialBT.printf("🆓 Espacio libre: %lluMB\n", freeBytes);
+  SerialBT.println("=== COMANDOS DISPONIBLES ===");
+  SerialBT.println("📸 'CAPTURE' o 'FOTO' - Tomar foto");
+  SerialBT.println("📊 'STATUS' - Información del sistema");
+  SerialBT.println("🔄 'RESTART' - Reiniciar cámara");
+  SerialBT.println("============================\n");
+}
+
+void processBluetoothCommand(String command) {
+  command.toUpperCase();
+  command.trim();
+
+  Serial.printf("📱 Comando Bluetooth recibido: %s\n", command.c_str());
+
+  if (command == "CAPTURE" || command == "FOTO" || command == "PHOTO") {
+    SerialBT.println("🎯 Comando recibido: Tomando foto...");
+    takePhoto();
+  }
+  else if (command == "STATUS" || command == "INFO") {
+    sendStatus();
+  }
+  else if (command == "RESTART" || command == "RESET") {
+    SerialBT.println("🔄 Reiniciando cámara...");
+    esp_restart();
+  }
+  else if (command == "HELP") {
+    SerialBT.println("🤝 AYUDA - Comandos disponibles:");
+    SerialBT.println("📸 CAPTURE/FOTO/PHOTO - Tomar foto");
+    SerialBT.println("📊 STATUS/INFO - Estado del sistema");
+    SerialBT.println("🔄 RESTART/RESET - Reiniciar cámara");
+    SerialBT.println("❓ HELP - Esta ayuda");
+  }
+  else if (command == "DESTINATION" || command == "LOCATION" || command == "OUTPUT") {
+
+  }
+  else {
+    SerialBT.printf("❌ Comando no reconocido: %s\n", command.c_str());
+    SerialBT.println("💡 Envía 'HELP' para ver comandos disponibles");
+  }
+}
+
+void loop() {
+  // 1. Procesar comandos Bluetooth
+  if (bluetoothEnabled && SerialBT.available()) {
+    String command = SerialBT.readString();
+    command.trim();
+    processBluetoothCommand(command);
+  }
+
+  // 2. Detectar botón físico
+  bool currentButtonState = digitalRead(BUTTON_PIN);
+
+  if (currentButtonState != lastButtonState) {
+    lastDebounceTime = millis();
+  }
+
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    if (currentButtonState == LOW && !buttonPressed) {
+      buttonPressed = true;
+      Serial.println("🔘 Botón físico presionado - Tomando foto...");
+      if (bluetoothEnabled) {
+        SerialBT.println("🔘 Botón físico presionado - Tomando foto...");
+      }
+      takePhoto();
+    }
+    else if (currentButtonState == HIGH && buttonPressed) {
+      buttonPressed = false;
+    }
+  }
+
+  lastButtonState = currentButtonState;
+
+  delay(50);
+}

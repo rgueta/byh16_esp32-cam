@@ -7,3 +7,9 @@ detector de placas, es el definitivo (tienen opciones:
 Se deben borrar todos los repositorios hechos
 por las pruebas que se hicieron para aprender a usar el esp32-cam, todos los
 repositorios que empiezan con: 'byh16pics*'
+
+
+1024x768,18 --> 50Kb
+
+ssid = "FamGuEst_2.4";
+password = "l0l1t@..:)";
