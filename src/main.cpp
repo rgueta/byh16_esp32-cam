@@ -22,6 +22,8 @@ using namespace eloq;   // ← SIN ESTO, "camera" NO EXISTE
 // Pin del botón físico
 #define BUTTON_PIN 12
 #define FLASH_PIN        4     // LED Flash/Linterna
+#define LED_ROJO 33  // LED rojo en algunas versiones
+
 
 // Configuración WiFi
 const char* ssid = "FamGuEst_2.4";
@@ -53,8 +55,8 @@ bool setupCameraHD();
 bool setupSDCard();
 bool setupCameraOptimized();
 void flushCameraBuffer();
-void flashOn();
-void flashOff();
+void ledOn(String color);
+void ledOff(String color);
 void applyLowBrightnessSettings();
 String getBluetoothMAC();
 
@@ -72,7 +74,9 @@ void setup() {
 
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(FLASH_PIN, OUTPUT);
+  pinMode(LED_ROJO, OUTPUT);
   digitalWrite(FLASH_PIN, LOW); // Asegurar que el flash esté apagado al inicio
+  digitalWrite(LED_ROJO, HIGH); // Asegurar que el led rojo esté apagado al inicio
 
   // Bluetooth - Solo si hay suficiente memoria
   if (bluetoothEnabled) {
@@ -110,8 +114,8 @@ void setup() {
       applyLowBrightnessSettings();
   }
 
-  flashOn();
-  flashOff();
+  ledOn("white");
+  ledOff("white");
 }
 
 String generarNombreUnico() {
@@ -413,6 +417,10 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
         return;
     }
 
+    // Foto exitosa - LED parpadea rápido
+        ledOn("red");
+        ledOff("red");
+
     // Ahora el frame está en camera.frame (seguro y limpio)
     Serial.printf("Foto capturada: %d bytes\n", camera.frame->len);
     Serial.printf("Memoria tras captura: %d bytes\n", ESP.getFreeHeap());
@@ -600,13 +608,21 @@ String getBluetoothMAC() {
 }
 
 
-void flashOn() {
-  digitalWrite(FLASH_PIN, HIGH);
+void ledOn(String color) {
+    if (color == "white"){
+        digitalWrite(FLASH_PIN, HIGH);
+    }else{
+        digitalWrite(LED_ROJO, LOW);
+    }
   delay(100);
 }
 
-void flashOff() {
-  digitalWrite(FLASH_PIN, LOW);
+void ledOff(String color) {
+    if (color == "white"){
+        digitalWrite(FLASH_PIN, LOW);
+    }else{
+        digitalWrite(LED_ROJO, HIGH);
+    }
 }
 
 void loop() {
