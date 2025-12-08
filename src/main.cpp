@@ -5,6 +5,9 @@
 #include "esp_bt.h"
 #include "esp_bt_device.h"
 #include <WiFi.h>
+#include <Preferences.h>
+
+Preferences preferences;
 
 // Configuración de pines para AI-THINKER ESP32-CAM
 #define CAMERA_MODEL_AI_THINKER
@@ -111,6 +114,16 @@ void setup() {
   flashOff();
 }
 
+String generarNombreUnico() {
+    preferences.begin("fotos", false);
+    int contador = preferences.getInt("contador", 0);
+    contador++;
+    preferences.putInt("contador", contador);
+    preferences.end();
+
+    return "/fotos/" + String(contador) + ".jpg";
+}
+
 void setupWiFi() {
   Serial.printf("📡 Conectando a: %s\n", ssid);
 
@@ -162,7 +175,7 @@ bool setupCameraOptimized() {
   // config.jpeg_quality = 24; // Calidad alta
 
   config.frame_size = FRAMESIZE_SVGA; // 800x600
-  config.jpeg_quality = 20; // Calidad media (menos que antes)
+  config.jpeg_quality = 10; // Calidad media (menos que antes)
 
   // config.frame_size = FRAMESIZE_VGA; // 640x480
   // config.jpeg_quality = 10; // 10-63, lower means higher quality
@@ -407,7 +420,8 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
     // GUARDAR EN SD (si se solicita)
     if (saveToSD) {
         char filename[32];
-        sprintf(filename, "/fotos/IMG_%04d.jpg", photoCounter);
+        // sprintf(filename, "/fotos/IMG_%04d.jpg", photoCounter);
+        sprintf(filename, generarNombreUnico().c_str(), photoCounter);
 
         if (sdmmc.save(camera.frame).to(filename).isOk()) {
             Serial.println("Foto guardada en SD: " + String(filename));
