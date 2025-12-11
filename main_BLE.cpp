@@ -1,15 +1,19 @@
 /*
- version con Bluetooth Classic
+ version con Bluetooth Low Energy (BLE)
+ no funciona porque el apagando y encendido
+ toma recursos de procesamiento y afecta
+ la toma de fotos
  */
 
 #include "esp_camera.h"
 #include "FS.h"
 #include "SD_MMC.h"
-#include "BluetoothSerial.h"
-#include "esp_bt.h"
-#include "esp_bt_device.h"
 #include <WiFi.h>
 #include <Preferences.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
 
 Preferences preferences;
 
@@ -20,14 +24,12 @@ Preferences preferences;
 #include <eloquent_esp32cam.h>
 #include <eloquent_esp32cam/extra/esp32/fs/sdmmc.h>
 
-// ESTO ES LO QUE TE FALTABA:
 using namespace eloq;   // ← SIN ESTO, "camera" NO EXISTE
 
 // Pin del botón físico
 #define BUTTON_PIN 12
 #define FLASH_PIN        4     // LED Flash/Linterna
 #define LED_ROJO 33  // LED rojo en algunas versiones
-
 
 // Configuración WiFi
 const char* ssid = "FamGuEst_2.4";
@@ -36,9 +38,6 @@ const char* serverHost = "192.168.1.170";
 const int serverPort = 5000;
 const char* authToken = "Bearer 1234";
 
-// Objeto Bluetooth
-BluetoothSerial SerialBT;
-
 // Variables globales
 bool LowBrightness = false;
 bool buttonPressed = false;
@@ -46,16 +45,24 @@ unsigned long lastDebounceTime = 0;
 unsigned long debounceDelay = 50;
 bool lastButtonState = HIGH;
 int photoCounter = 0;
-bool bluetoothEnabled = true;
-bool wifiEnabled = false;
 bool sdCardReady = false;
 String lastPhotoSDpath = "";
 
-const char* deviceName = "BYH16PIC1";
-String macAddress = "";
-String btMAC = "";
-String modoBrillo = "defult";
+const char* deviceName = "ESP32-CAM-BLE";
+String bleAddress = "";
 
+// UUIDs para servicios y características BLE
+#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID_RX "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+#define CHARACTERISTIC_UUID_TX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+
+// Variables BLE
+BLEServer *pServer = NULL;
+BLECharacteristic *pTxCharacteristic = NULL;
+BLECharacteristic *pRxCharacteristic = NULL;
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+String bleCommand = "";
 
 void setupWiFi();
 bool setupCameraHD();
@@ -64,24 +71,55 @@ bool setupCameraOptimized();
 void flushCameraBuffer();
 void ledOn(String color);
 void ledOff(String color);
+void applyLowBrightnessSettings();
+String getBLEAddress();
+void sendBLEMessage(String message);
+void processBluetoothCommand(String command);
+void captureProcessAndSend(bool saveToSD, bool sendToServer);
+String generarNombreUnico();
 
-// Seccion para ajustar brillo  ------------
-void applyLowBrightnessSettings_original();
-void applyBrightnessSettings();
-void ajustarBrilloCamara(bool exterior);
-// -----------------------------------
+// Clase para manejar callbacks del servidor BLE
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      deviceConnected = true;
+      Serial.println("✅ Dispositivo BLE conectado");
+      digitalWrite(LED_ROJO, LOW); // LED encendido cuando conectado
+    };
 
-String getBluetoothMAC();
+    void onDisconnect(BLEServer* pServer) {
+      deviceConnected = false;
+      Serial.println("❌ Dispositivo BLE desconectado");
+      digitalWrite(LED_ROJO, HIGH); // LED apagado cuando desconectado
+      delay(500); // dar tiempo para que se complete la desconexión
+      pServer->startAdvertising(); // volver a anunciar
+      Serial.println("📢 BLE anunciando de nuevo...");
+    }
+};
 
-// NO usamos buffer temporal - demasiada memoria
-// En su lugar, enviamos directamente desde el frame buffer
+// Clase para manejar callbacks de característica RX
+class MyCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+      std::string rxValue = pCharacteristic->getValue();
+
+      if (rxValue.length() > 0) {
+        Serial.print("📱 Comando BLE recibido: ");
+        Serial.println(rxValue.c_str());
+
+        // Procesar comando
+        bleCommand = String(rxValue.c_str());
+        bleCommand.trim();
+        processBluetoothCommand(bleCommand);
+      }
+    }
+};
+
+
 
 void setup() {
   Serial.begin(115200);
   Serial.setDebugOutput(true);
 
-  Serial.printf("\n=== HD-1280x720,4 - SIN BUFFER TEMPORAL ===");
-
+  Serial.printf("\n=== ESP32-CAM SVGA,10 - CON BLE ===");
   Serial.printf("💾 Memoria inicial: %d bytes\n", ESP.getFreeHeap());
 
   pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -90,27 +128,56 @@ void setup() {
   digitalWrite(FLASH_PIN, LOW); // Asegurar que el flash esté apagado al inicio
   digitalWrite(LED_ROJO, HIGH); // Asegurar que el led rojo esté apagado al inicio
 
-  // Bluetooth - Solo si hay suficiente memoria
-  if (bluetoothEnabled) {
-    if (!SerialBT.begin(deviceName)) {
-      Serial.println("❌ Error en Bluetooth");
-      bluetoothEnabled = false;
-    } else {
-      btMAC = getBluetoothMAC();
-      Serial.printf("✅ Bluetooth: %s, %s\n ", deviceName, btMAC.c_str());
-    }
-  }
+  // Inicializar BLE
+  Serial.println("📱 Inicializando BLE...");
+  BLEDevice::init(deviceName);
+  bleAddress = BLEDevice::getAddress().toString().c_str();
+  Serial.printf("📱 Dirección BLE: %s\n", bleAddress.c_str());
+
+  // Crear servidor BLE
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  // Crear servicio BLE
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+
+  // Crear característica para TX (envío de datos al cliente)
+  pTxCharacteristic = pService->createCharacteristic(
+                      CHARACTERISTIC_UUID_TX,
+                      BLECharacteristic::PROPERTY_NOTIFY
+                    );
+  pTxCharacteristic->addDescriptor(new BLE2902());
+
+  // Crear característica para RX (recepción de comandos desde el cliente)
+  pRxCharacteristic = pService->createCharacteristic(
+                      CHARACTERISTIC_UUID_RX,
+                      BLECharacteristic::PROPERTY_WRITE
+                    );
+  pRxCharacteristic->setCallbacks(new MyCallbacks());
+
+  // Iniciar servicio
+  pService->start();
+
+  // Configurar parámetros de advertising
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);  // Para evitar problemas de conexión en algunos teléfonos
+  pAdvertising->setMinPreferred(0x12);
+
+  // Iniciar advertising
+  BLEDevice::startAdvertising();
+  Serial.println("📢 BLE anunciando...");
+  Serial.println("Conéctate con la app 'BLE Scanner' o similar");
 
   // WiFi
-  if(wifiEnabled){
-      setupWiFi();
-  }
-
+  setupWiFi();
 
   // Cámara HD - Calidad reducida para evitar problemas
   Serial.println("📷 Inicializando cámara optimizada...");
   if (!setupCameraOptimized()) {
     Serial.println("❌ Error en cámara!");
+    sendBLEMessage("❌ Error en cámara!");
     return;
   }
 
@@ -119,18 +186,12 @@ void setup() {
 
   Serial.println("\n🎯 SISTEMA LISTO");
   Serial.printf("💾 Memoria libre: %d bytes\n", ESP.getFreeHeap());
-  Serial.println("📱 ENVIAR: Toma y envía foto ACTUAL");
-  Serial.println("📱 POST: Envía última foto de SD");
-  Serial.printf("LowBrightness: %s\n", (LowBrightness ? "True" : "False"));
+  sendBLEMessage("🎯 Sistema listo - Envía 'AYUDA' para comandos");
 
-
-  // Ajustes para reducir brillo
+  // Ajustes para reducir brillo central
   if (LowBrightness){
-      applyLowBrightnessSettings_original();
+      applyLowBrightnessSettings();
   }
-
-  Serial.printf("modoBrillo: %s\n", modoBrillo.c_str());
-  SerialBT.printf("modoBrillo: %s\n", modoBrillo.c_str());
 
   ledOn("white");
   ledOff("white");
@@ -148,6 +209,7 @@ String generarNombreUnico() {
 
 void setupWiFi() {
   Serial.printf("📡 Conectando a: %s\n", ssid);
+  sendBLEMessage("📡 Conectando WiFi...");
 
   WiFi.setAutoReconnect(true);
   WiFi.persistent(true);
@@ -158,12 +220,15 @@ void setupWiFi() {
     if (WiFi.status() == WL_CONNECTED) {
       Serial.println("\n✅ WiFi conectado!");
       Serial.printf("📶 IP: %s\n", WiFi.localIP().toString().c_str());
+      sendBLEMessage("✅ WiFi conectado! IP: " + WiFi.localIP().toString());
       return;
     }
     delay(1000);
     Serial.print(".");
+    sendBLEMessage(".");
   }
   Serial.println("\n❌ Error en WiFi");
+  sendBLEMessage("❌ Error en WiFi");
 }
 
 bool setupCameraOptimized() {
@@ -187,25 +252,14 @@ bool setupCameraOptimized() {
   config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 20000000;
+  config.xclk_freq_hz = 10000000;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.fb_count = 2;
+  config.fb_count = 1;
 
-  // Configuración OPTIMIZADA - Menos calidad para fotos más pequeñas
+  // Configuración OPTIMIZADA
   config.pixel_format = PIXFORMAT_JPEG;
-
-  // Perfil: EXTERIOR DIURNO
-  config.frame_size = FRAMESIZE_HD; // 1280x720
-  config.jpeg_quality = 4; // Calidad alta
-
-  // config.frame_size = FRAMESIZE_XGA; // 1024x768
-  // config.jpeg_quality = 4; // Calidad alta
-
-  // config.frame_size = FRAMESIZE_SVGA; // 800x600
-  // config.jpeg_quality = 1; // Calidad media (menos que antes)
-
-  // config.frame_size = FRAMESIZE_VGA; // 640x480
-  // config.jpeg_quality = 10; // 10-63, lower means higher quality
+  config.frame_size = FRAMESIZE_SVGA; // 800x600
+  config.jpeg_quality = 10; // Calidad media
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
@@ -214,11 +268,10 @@ bool setupCameraOptimized() {
   }
 
   Serial.printf("✅ Cámara optimizada lista. Memoria: %d bytes\n", ESP.getFreeHeap());
-
   return true;
 }
 
-void applyLowBrightnessSettings_original() {
+void applyLowBrightnessSettings() {
     sensor_t *s = esp_camera_sensor_get();
 
     if (s == NULL) {
@@ -230,82 +283,21 @@ void applyLowBrightnessSettings_original() {
     s->set_reg(s, 0xFF, 0x01, 0x01);
     delay(100);
 
-    // 1. Deshabilitar ajustes automáticos problemáticos
+    // Ajustes de cámara para baja luminosidad
     s->set_gain_ctrl(s, 0);      // Control de ganancia OFF
     s->set_exposure_ctrl(s, 1);  // Control de exposición ON
     s->set_aec2(s, 0);           // AEC2 OFF (para exteriores)
-
-    // 2. Ajustar exposición manualmente
     s->set_ae_level(s, -1);      // Nivel exposición: -2 a 2
     s->set_aec_value(s, 800);    // Valor AEC: 300-2000 (menor = más oscuro)
-
-    // 3. Ajustar ganancia
     s->set_agc_gain(s, 0);       // Ganancia AGC: 0-30
-
-    // 4. Ajustes básicos de imagen
     s->set_brightness(s, -1);    // Brillo: -2 a 2
     s->set_contrast(s, 1);       // Contraste: -2 a 2
     s->set_saturation(s, 0);     // Saturación: -2 a 2
-
-    // 5. Configuraciones adicionales
     s->set_dcw(s, 1);            // Downsize ENC ON
     s->set_raw_gma(s, 1);        // RAW GMA ON
-
-    // 6. Específico para OV2640 (modelo común)
     s->set_special_effect(s, 0); // Efecto especial: 0=normal
 
     Serial.println("Configuración de cámara aplicada");
-}
-
-// Ajuste de exposicion y brillo #1
-void applyBrightnessSettings(){
-    // AJUSTES DE EXPOSICIÓN Y BRILO
-    sensor_t *s = esp_camera_sensor_get();
-
-    // Reducir exposición (ajustar según condiciones)
-    s->set_exposure_ctrl(s, 1); // Activar control de exposición
-    s->set_aec_value(s, 800);   // Valor más bajo = menos exposición (rango: 0-1200)
-
-    // Ajustar ganancia
-    s->set_gain_ctrl(s, 1);     // Activar control de ganancia
-    s->set_agc_gain(s, 5);      // Ganancia más baja (rango: 0-30)
-
-    // Ajustar contraste y saturación
-    s->set_contrast(s, 0);      // Contraste normal (rango: -2 a 2)
-    s->set_saturation(s, -1);   // Reducir saturación si hay colores muy brillantes
-
-    // White Balance - importante para condiciones cambiantes
-    s->set_whitebal(s, 1);      // Auto white balance ON
-    s->set_awb_gain(s, 1);      // Ganancia AWB activada
-
-    // Configuración específica para OCR
-    s->set_special_effect(s, 0); // Sin efecto especial
-    s->set_bpc(s, 1);           // Corrección de píxeles negros
-    s->set_wpc(s, 1);           // Corrección de píxeles blancos
-}
-
-// Otra configuracion con opciones ( interior y exterior )
-void ajustarBrilloCamara(bool exterior) {
-    sensor_t *s = esp_camera_sensor_get();
-
-    if (exterior) {
-        // Configuración para EXTERIOR
-        s->set_exposure_ctrl(s, 1);
-        s->set_aec_value(s, 400);     // Exposición baja para exterior brillante
-        s->set_gain_ctrl(s, 1);
-        s->set_agc_gain(s, 2);        // Ganancia mínima para exterior
-        s->set_brightness(s, -2);     // Brillo reducido
-        s->set_contrast(s, 1);        // Contraste aumentado
-        delay(100);
-    } else {
-        // Configuración para INTERIOR
-        s->set_exposure_ctrl(s, 1);
-        s->set_aec_value(s, 1200);    // Exposición alta para interior
-        s->set_gain_ctrl(s, 1);
-        s->set_agc_gain(s, 20);       // Ganancia alta para interior
-        s->set_brightness(s, 0);      // Brillo normal
-        delay(100);
-    }
 }
 
 bool setupSDCard() {
@@ -317,6 +309,7 @@ bool setupSDCard() {
         SD_MMC.mkdir("/fotos");
       }
       Serial.println("✅ SD lista");
+      sendBLEMessage("✅ SD lista");
       return true;
     }
   }
@@ -330,10 +323,10 @@ bool sendPhotoDirectNoCopy(const uint8_t* imageData, size_t imageSize) {
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("❌ WiFi no conectado");
+    sendBLEMessage("❌ WiFi no conectado");
     return false;
   }
 
-  // Si la memoria está muy baja, hacer una pausa
   if (ESP.getFreeHeap() < 12000) {
     Serial.println("⚠️  Memoria baja, pausando...");
     delay(2000);
@@ -341,18 +334,20 @@ bool sendPhotoDirectNoCopy(const uint8_t* imageData, size_t imageSize) {
   }
 
   WiFiClient client;
-  client.setTimeout(30000); // Timeout largo
+  client.setTimeout(30000);
 
   Serial.println("🔗 Conectando al servidor...");
+  sendBLEMessage("🔗 Conectando al servidor...");
 
   if (!client.connect(serverHost, serverPort)) {
     Serial.println("❌ No se pudo conectar al servidor");
+    sendBLEMessage("❌ No se pudo conectar al servidor");
     return false;
   }
 
   Serial.println("✅ Conectado, preparando envío...");
+  sendBLEMessage("✅ Conectado, enviando...");
 
-  // Construir request HTTP
   String headers = String("POST /upload HTTP/1.1\r\n") +
                   "Host: " + String(serverHost) + ":" + String(serverPort) + "\r\n" +
                   "Content-Type: application/octet-stream\r\n" +
@@ -360,52 +355,41 @@ bool sendPhotoDirectNoCopy(const uint8_t* imageData, size_t imageSize) {
                   "Content-Length: " + String(imageSize) + "\r\n" +
                   "Connection: close\r\n\r\n";
 
-  // Enviar headers
   if (!client.print(headers)) {
     Serial.println("❌ Error enviando headers");
     client.stop();
     return false;
   }
 
-  // Enviar datos DIRECTAMENTE desde imageData - SIN COPIA
   size_t sent = 0;
-  const size_t CHUNK_SIZE = 512; // Chunks más pequeños para memoria baja
-   // const size_t CHUNK_SIZE = 1024; // Chunks medio para prueba de memoria
-  //const size_t CHUNK_SIZE = 2048; // Chunks MAxima para prueba, evitar fallas de envio
-
+  const size_t CHUNK_SIZE = 512;
 
   while (sent < imageSize) {
     size_t toSend = (imageSize - sent > CHUNK_SIZE) ? CHUNK_SIZE : (imageSize - sent);
-
-    // Enviar chunk directamente desde imageData
     size_t written = client.write(imageData + sent, toSend);
 
     if (written == 0) {
-      Serial.println("❌ Error enviando chunk - puede ser memoria baja");
+      Serial.println("❌ Error enviando chunk");
       Serial.printf("💾 Memoria durante error: %d bytes\n", ESP.getFreeHeap());
       client.stop();
-
-      // Intentar liberar memoria
       delay(1000);
       return false;
     }
 
     sent += written;
 
-    // Mostrar progreso cada 10KB
     if (sent % 10240 == 0 || sent == imageSize) {
-      Serial.printf("📦 Progreso: %d/%d bytes (%.1f%%)\n",
-                   sent, imageSize, (sent * 100.0) / imageSize);
-      Serial.printf("💾 Memoria durante envío: %d bytes\n", ESP.getFreeHeap());
+      int progress = (sent * 100) / imageSize;
+      Serial.printf("📦 Progreso: %d/%d bytes (%d%%)\n", sent, imageSize, progress);
+      sendBLEMessage("📦 Enviando: " + String(progress) + "%");
     }
 
-    // Pequeña pausa para evitar saturación y dar tiempo al sistema
     delay(1);
   }
 
   Serial.println("✅ Datos enviados, esperando respuesta...");
+  sendBLEMessage("✅ Datos enviados, esperando respuesta...");
 
-  // Esperar respuesta con timeout
   unsigned long startTime = millis();
   while (!client.available() && millis() - startTime < 15000) {
     delay(10);
@@ -415,28 +399,27 @@ bool sendPhotoDirectNoCopy(const uint8_t* imageData, size_t imageSize) {
   if (client.available()) {
     String response = client.readStringUntil('\n');
     Serial.printf("📨 Respuesta: %s\n", response.c_str());
+    sendBLEMessage("📨 Respuesta: " + response.substring(0, 30));
 
     if (response.indexOf("200") > 0) {
       success = true;
       Serial.println("🎉 Foto enviada exitosamente!");
+      sendBLEMessage("🎉 Foto enviada exitosamente!");
     }
   } else {
-    Serial.println("⚠️  Timeout esperando respuesta (pero datos enviados)");
-    // Considerar éxito si los datos se enviaron completamente
+    Serial.println("⚠️  Timeout esperando respuesta");
+    sendBLEMessage("⚠️  Timeout (datos enviados)");
     if (sent == imageSize) {
       success = true;
-      Serial.println("✅ Datos enviados completamente, asumiendo éxito");
+      Serial.println("✅ Datos enviados completamente");
     }
   }
 
   client.stop();
-
-  // Pausa para liberar memoria después del envío
   delay(500);
 
   return success;
 }
-
 
 bool savePhotoToSD(const uint8_t* imageData, size_t imageSize) {
   if (!sdCardReady) return false;
@@ -458,78 +441,68 @@ bool savePhotoToSD(const uint8_t* imageData, size_t imageSize) {
   return false;
 }
 
-
 void captureProcessAndSend(bool saveToSD, bool sendToServer) {
     photoCounter++;
     Serial.printf("\nTOMANDO FOTO #%d\n", photoCounter);
     Serial.printf("Memoria antes: %d bytes\n", ESP.getFreeHeap());
+    sendBLEMessage("📸 Tomando foto #" + String(photoCounter));
 
-    // LIMPIAR BUFFER ANTES DE CAPTURAR (crucial!)
+    // Limpiar buffer
     flushCameraBuffer();
-    delay(100);  // Estabilización
+    delay(100);
 
-    // =======================================================
-    // ⭐️ PASO NUEVO: DISPARO DE DESCARTE (DUMMY SHOT / HARDWARE FLUSH)
-    // Se fuerza al hardware a tomar una foto y llenar el buffer con datos actuales.
-    // Esto asegura que el siguiente 'capture()' tome el frame más reciente.
-    // =======================================================
+    // Disparo de descarte
     Serial.println("📷 Realizando disparo de descarte...");
     if (camera.capture().isOk()) {
-        // Liberar el frame de descarte inmediatamente
         flushCameraBuffer();
     } else {
-        Serial.println("⚠️ Fallo el disparo de descarte. Intentando continuar.");
+        Serial.println("⚠️ Fallo el disparo de descarte");
+        sendBLEMessage("⚠️ Fallo disparo descarte");
     }
-    delay(100); // Pequeña pausa para estabilización
+    delay(100);
 
-
-
-    // CAPTURA USANDO ELOQUENT (NO uses esp_camera_fb_get() directamente)
+    // Captura principal
     if (!camera.capture().isOk()) {
         Serial.println("Error capturando foto: " + camera.exception.toString());
-        flushCameraBuffer();  // Limpia aunque haya fallado
+        sendBLEMessage("❌ Error capturando foto");
+        flushCameraBuffer();
         return;
     }
 
-    // Foto exitosa - LED parpadea rápido
-        ledOn("red");
-        ledOff("red");
+    // LED indicador
+    ledOn("red");
+    ledOff("red");
 
-    // Ahora el frame está en camera.frame (seguro y limpio)
     Serial.printf("Foto capturada: %d bytes\n", camera.frame->len);
     Serial.printf("Memoria tras captura: %d bytes\n", ESP.getFreeHeap());
+    sendBLEMessage("✅ Foto: " + String(camera.frame->len/1024) + "KB");
 
-    // GUARDAR EN SD (si se solicita)
-    if (saveToSD) {
+    // Guardar en SD
+    if (saveToSD && sdCardReady) {
         char filename[32];
-        // sprintf(filename, "/fotos/IMG_%04d.jpg", photoCounter);
         sprintf(filename, generarNombreUnico().c_str(), photoCounter);
 
         if (sdmmc.save(camera.frame).to(filename).isOk()) {
             Serial.println("Foto guardada en SD: " + String(filename));
+            sendBLEMessage("💾 Guardada: " + String(filename));
         } else {
             Serial.println("Error al guardar en SD");
+            sendBLEMessage("❌ Error guardando SD");
         }
     }
 
-    // ENVIAR AL SERVIDOR (directo desde buffer, sin copias)
+    // Enviar al servidor
     if (sendToServer && WiFi.status() == WL_CONNECTED) {
-        Serial.println("Enviando foto al servidor...");
-
+        sendBLEMessage("📡 Enviando al servidor...");
         if (sendPhotoDirectNoCopy(camera.frame->buf, camera.frame->len)) {
             Serial.println("Foto enviada exitosamente!");
-            if (bluetoothEnabled && SerialBT.hasClient()) {
-                SerialBT.println("Foto enviada al servidor!");
-            }
         } else {
             Serial.println("Error enviando foto");
-            if (bluetoothEnabled && SerialBT.hasClient()) {
-                SerialBT.println("Error enviando foto");
-            }
+            sendBLEMessage("❌ Error enviando foto");
         }
     }
 
-    // LIMPIAR BUFFER AL FINAL (¡OBLIGATORIO!)
+    // Limpiar buffer
     flushCameraBuffer();
     delay(100);
 
@@ -538,61 +511,72 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
 }
 
 void flushCameraBuffer() {
-    // Método compatible con ambas librerías
     if (camera.frame != nullptr) {
         esp_camera_fb_return(camera.frame);
         camera.frame = nullptr;
     }
-
-    // Si usas EloquentEsp32cam, también puedes hacer:
-    // camera.frame->clear();
-
     Serial.println("Buffer de cámara limpiado");
+}
+
+void sendBLEMessage(String message) {
+    if (deviceConnected && pTxCharacteristic != NULL) {
+        // BLE tiene límite de 20 bytes por paquete, dividimos mensajes largos
+        const int CHUNK_SIZE = 20;
+
+        if (message.length() <= CHUNK_SIZE) {
+            pTxCharacteristic->setValue(message.c_str());
+            pTxCharacteristic->notify();
+            delay(10);
+        } else {
+            // Dividir mensaje largo en chunks
+            for (int i = 0; i < message.length(); i += CHUNK_SIZE) {
+                String chunk = message.substring(i, i + CHUNK_SIZE);
+                pTxCharacteristic->setValue(chunk.c_str());
+                pTxCharacteristic->notify();
+                delay(10);
+            }
+        }
+    }
 }
 
 void processBluetoothCommand(String command) {
   command.toUpperCase();
   command.trim();
 
-  Serial.printf("📱 Comando: %s\n", command.c_str());
+  Serial.printf("📱 Comando BLE: %s\n", command.c_str());
 
-  if (!bluetoothEnabled || !SerialBT.hasClient()) return;
+  if (!deviceConnected) return;
 
   if (command == "FOTO") {
-    SerialBT.println("📸 Tomando foto (solo guarda en SD)...");
+    sendBLEMessage("📸 Tomando foto (solo guarda en SD)...");
     captureProcessAndSend(true, false);
-  }
-  else if (command == "REBOOT") {
-      ESP.restart();
   }
   else if (command == "ENVIAR") {
     if (WiFi.status() != WL_CONNECTED) {
-      SerialBT.println("❌ WiFi no conectado");
+      sendBLEMessage("❌ WiFi no conectado");
       return;
     }
-    SerialBT.println("🚀 Tomando y enviando foto ACTUAL...");
+    sendBLEMessage("🚀 Tomando y enviando foto ACTUAL...");
     captureProcessAndSend(true, true);
   }
   else if (command == "POST") {
     if (lastPhotoSDpath == "") {
-      SerialBT.println("❌ No hay foto guardada en SD");
+      sendBLEMessage("❌ No hay foto guardada en SD");
       return;
     }
     if (WiFi.status() != WL_CONNECTED) {
-      SerialBT.println("❌ WiFi no conectado");
+      sendBLEMessage("❌ WiFi no conectado");
       return;
     }
-    SerialBT.println("📡 Enviando última foto de SD...");
+    sendBLEMessage("📡 Enviando última foto de SD...");
 
     File file = SD_MMC.open(lastPhotoSDpath.c_str(), FILE_READ);
     if (!file) {
-      SerialBT.println("❌ Error abriendo archivo");
+      sendBLEMessage("❌ Error abriendo archivo");
       return;
     }
 
     size_t fileSize = file.size();
-
-    // Leer en chunks para no usar mucha memoria
     bool success = false;
     WiFiClient client;
 
@@ -619,7 +603,6 @@ void processBluetoothCommand(String command) {
 
       file.close();
 
-      // Esperar respuesta breve
       unsigned long start = millis();
       while (!client.available() && millis() - start < 5000) delay(10);
 
@@ -633,64 +616,47 @@ void processBluetoothCommand(String command) {
       file.close();
     }
 
-    SerialBT.println(success ? "✅ Foto de SD enviada" : "❌ Error enviando");
+    sendBLEMessage(success ? "✅ Foto de SD enviada" : "❌ Error enviando");
   }
   else if (command == "MEMORIA") {
-    SerialBT.printf("💻 Memoria: %d bytes\n", ESP.getFreeHeap());
-    SerialBT.printf("📡 WiFi: %s\n", WiFi.status() == WL_CONNECTED ? "✅" : "❌");
-    SerialBT.printf("📷 Fotos: %d\n", photoCounter);
-    SerialBT.printf("💾 SD: %s\n", sdCardReady ? "✅" : "❌");
+    String memMsg = "💻 Mem: " + String(ESP.getFreeHeap()) + " bytes\n";
+    memMsg += "📡 WiFi: " + String(WiFi.status() == WL_CONNECTED ? "✅" : "❌") + "\n";
+    memMsg += "📷 Fotos: " + String(photoCounter) + "\n";
+    memMsg += "💾 SD: " + String(sdCardReady ? "✅" : "❌");
+    sendBLEMessage(memMsg);
   }
   else if (command == "CALIDAD") {
-    // Cambiar a calidad más baja si hay problemas
     sensor_t *s = esp_camera_sensor_get();
     if (s != NULL) {
-      s->set_quality(s, 22); // Calidad más baja
-      SerialBT.println("🔧 Calidad reducida a 22 para fotos más pequeñas");
+      s->set_quality(s, 22);
+      sendBLEMessage("🔧 Calidad reducida a 22");
     }
   }
   else if (command == "OBSCURO"){
       LowBrightness = !LowBrightness;
       Serial.printf("LowBrightness: %s\n", (LowBrightness ? "True" : "False"));
-      SerialBT.printf("LowBrightness: %s\n", (LowBrightness ? "True" : "False"));
-  }
-  else if (command == "EXTERIOR"){
-      modoBrillo = "Exterior";
-      SerialBT.printf("modoBrillo: %s\n", modoBrillo.c_str());
-      ajustarBrilloCamara(true);
-  }
-  else if (command == "INTERIOR"){
-      modoBrillo = "Interior";
-      SerialBT.printf("modoBrillo: %s\n", modoBrillo.c_str());
-      ajustarBrilloCamara(false);
+      sendBLEMessage("LowBrightness: " + String(LowBrightness ? "True" : "False"));
   }
   else if (command == "AYUDA"){
-      SerialBT.printf("BT MAC: %s\n", btMAC.c_str());
-      SerialBT.printf("LowBrightness: %s\n", (LowBrightness ? "True" : "False"));
+      String helpMsg = "BLE: " + bleAddress + "\n";
+      helpMsg += "LowBrightness: " + String(LowBrightness ? "True" : "False") + "\n";
+      helpMsg += "Comandos: FOTO, ENVIAR, POST\n";
+      helpMsg += "MEMORIA, CALIDAD, OBSCURO, AYUDA";
+      sendBLEMessage(helpMsg);
+  }
+  else if (command == "ESTADO" || command == "STATUS") {
+      String statusMsg = "=== ESTADO ===\n";
+      statusMsg += "BLE: " + String(deviceConnected ? "Conectado" : "Desconectado") + "\n";
+      statusMsg += "WiFi: " + String(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "No conectado") + "\n";
+      statusMsg += "Fotos: " + String(photoCounter) + "\n";
+      statusMsg += "Memoria: " + String(ESP.getFreeHeap()) + " bytes";
+      sendBLEMessage(statusMsg);
   }
   else {
-    SerialBT.println("❌ Comando no reconocido");
-    SerialBT.println("Comandos: FOTO, ENVIAR, POST, MEMORIA, CALIDAD,\n ");
-    SerialBT.println("OBSCURO, EXTERIOR, INTERIOR\n");
+    sendBLEMessage("❌ Comando no reconocido");
+    sendBLEMessage("Usa: FOTO, ENVIAR, POST, MEMORIA, CALIDAD, OBSCURO, AYUDA, ESTADO");
   }
 }
-
-// Función para obtener MAC Bluetooth
-String getBluetoothMAC() {
-  const uint8_t* point = esp_bt_dev_get_address();
-
-  if (point == NULL) {
-    return "00:00:00:00:00:00";
-  }
-
-  char macStr[18];
-  sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X",
-          point[0], point[1], point[2],
-          point[3], point[4], point[5]);
-
-  return String(macStr);
-}
-
 
 void ledOn(String color) {
     if (color == "white"){
@@ -710,12 +676,22 @@ void ledOff(String color) {
 }
 
 void loop() {
-  if (bluetoothEnabled && SerialBT.hasClient() && SerialBT.available()) {
-    String command = SerialBT.readString();
-    command.trim();
-    processBluetoothCommand(command);
+  // Manejar conexiones BLE
+  if (!deviceConnected && oldDeviceConnected) {
+    delay(500); // dar tiempo para que se complete la desconexión
+    pServer->startAdvertising();
+    Serial.println("📢 BLE anunciando...");
+    oldDeviceConnected = deviceConnected;
   }
 
+  if (deviceConnected && !oldDeviceConnected) {
+    oldDeviceConnected = deviceConnected;
+  }
+
+  // Procesar comandos BLE (ya se procesan en el callback)
+  // No necesitamos polling aquí porque BLE usa callbacks
+
+  // Control del botón físico
   bool currentButtonState = digitalRead(BUTTON_PIN);
 
   if (currentButtonState != lastButtonState) {
@@ -725,9 +701,11 @@ void loop() {
   if ((millis() - lastDebounceTime) > debounceDelay) {
     if (currentButtonState == LOW && !buttonPressed) {
       buttonPressed = true;
-      SerialBT.println("🔘 Botón físico presionado");
       Serial.println("🔘 Botón físico presionado");
-      captureProcessAndSend(true, false); //guarda en SD y manda al server
+      if (deviceConnected) {
+        sendBLEMessage("🔘 Botón físico presionado");
+      }
+      captureProcessAndSend(true, true); //guarda en SD y manda al server
     }
     else if (currentButtonState == HIGH && buttonPressed) {
       buttonPressed = false;
