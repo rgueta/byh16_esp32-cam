@@ -27,7 +27,7 @@ using namespace eloq;   // ← SIN ESTO, "camera" NO EXISTE
 #define BUTTON_PIN 12
 #define FLASH_PIN        4     // LED Flash/Linterna
 #define LED_ROJO 33  // LED rojo en algunas versiones
-#define LDR_PIN 13  // Pin para sensor de luz
+#define LDR_PIN 16 // Pin para sensor de luz
 
 
 // Configuración WiFi
