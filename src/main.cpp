@@ -27,6 +27,7 @@ using namespace eloq;   // ← SIN ESTO, "camera" NO EXISTE
 #define BUTTON_PIN 12
 #define FLASH_PIN        4     // LED Flash/Linterna
 #define LED_ROJO 33  // LED rojo en algunas versiones
+#define LDR_PIN 13  // Pin para sensor de luz
 
 
 // Configuración WiFi
@@ -56,6 +57,10 @@ String macAddress = "";
 String btMAC = "";
 String modoBrillo = "defult";
 
+// Variables globales (agrega esta línea)
+bool modoNoche = false;
+bool flashActivado = false;  // Para controlar el flash
+
 
 void setupWiFi();
 bool setupCameraHD();
@@ -70,6 +75,20 @@ void applyLowBrightnessSettings_original();
 void applyBrightnessSettings();
 void ajustarBrilloCamara(bool exterior);
 // -----------------------------------
+
+
+bool esDeNoche() {
+    // Leer sensor de luz (LDR)
+    int valorLuz = analogRead(LDR_PIN);
+    Serial.printf("📊 Sensor luz: %d\n", valorLuz);
+
+    // Umbral para determinar si es de noche
+    // Ajusta este valor según tus condiciones
+    if (valorLuz < 500) {  // Menos de 500 = oscuro
+        return true;
+    }
+    return false;
+}
 
 String getBluetoothMAC();
 
@@ -468,6 +487,13 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
     flushCameraBuffer();
     delay(100);  // Estabilización
 
+    // ACTIVAR FLASH SI ESTÁ EN MODO NOCHE
+    if (modoNoche && flashActivado) {
+        Serial.println("⚡ Activando flash...");
+        digitalWrite(FLASH_PIN, HIGH);
+        delay(50);  // Pequeño delay para que el flash se estabilice
+    }
+
     // =======================================================
     // ⭐️ PASO NUEVO: DISPARO DE DESCARTE (DUMMY SHOT / HARDWARE FLUSH)
     // Se fuerza al hardware a tomar una foto y llenar el buffer con datos actuales.
@@ -494,6 +520,12 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
     // Foto exitosa - LED parpadea rápido
         ledOn("red");
         ledOff("red");
+
+    // APAGAR FLASH INMEDIATAMENTE DESPUÉS DE CAPTURAR
+    if (modoNoche && flashActivado) {
+        digitalWrite(FLASH_PIN, LOW);
+        Serial.println("⚡ Flash apagado");
+    }
 
     // Ahora el frame está en camera.frame (seguro y limpio)
     Serial.printf("Foto capturada: %d bytes\n", camera.frame->len);
@@ -691,6 +723,56 @@ String getBluetoothMAC() {
   return String(macStr);
 }
 
+// Función para configurar la cámara en modo NOCHE/BAJA LUZ
+void configurarModoNoche() {
+    sensor_t *s = esp_camera_sensor_get();
+
+    if (s == NULL) {
+        Serial.println("Error: No se pudo obtener sensor para modo noche");
+        return;
+    }
+
+    Serial.println("🌙 Configurando cámara para MODO NOCHE...");
+
+    // 1. RESET a valores por defecto
+    s->set_reg(s, 0xFF, 0x01, 0x01);
+    delay(100);
+
+    // 2. HABILITAR todos los controles automáticos para baja luz
+    s->set_gain_ctrl(s, 1);       // Control de ganancia ON
+    s->set_exposure_ctrl(s, 1);   // Control de exposición ON
+    s->set_aec2(s, 0);            // AEC2 OFF (mejor para baja luz)
+    s->set_awb_gain(s, 1);        // Auto White Balance ON
+    s->set_whitebal(s, 1);        // White Balance automático
+    s->set_agc_gain(s, 30);       // Ganancia máxima (0-30)
+    s->set_ae_level(s, 0);        // Nivel exposición medio
+
+    // 3. Aumentar MÁXIMO la exposición
+    s->set_aec_value(s, 1200);    // Exposición máxima (1200)
+
+    // 4. Aumentar brillo y contraste para ver detalles
+    s->set_brightness(s, 2);      // Brillo máximo (+2)
+    s->set_contrast(s, 1);        // Contraste medio (+1)
+    s->set_saturation(s, -1);     // Reducir saturación para menos ruido
+
+    // 5. Reducir ruido digital
+    s->set_bpc(s, 1);             // Corrección de píxeles negros ON
+    s->set_wpc(s, 1);             // Corrección de píxeles blancos ON
+    s->set_raw_gma(s, 1);         // Gamma correction ON
+    s->set_lenc(s, 1);            // Lensa correction ON
+
+    // 6. Frame size más pequeño para mejor rendimiento en baja luz
+    s->set_framesize(s, FRAMESIZE_VGA);  // 640x480 (más luz por pixel)
+
+    // 7. Configuraciones específicas para OV2640 en baja luz
+    s->set_special_effect(s, 0);  // Sin efecto especial
+    s->set_dcw(s, 1);             // Downsize enable
+
+    delay(200); // Esperar que se apliquen los cambios
+
+    Serial.println("✅ Modo noche configurado");
+    Serial.println("📝 Parámetros: Exp=1200, Ganancia=30, Brillo=2");
+}
 
 void ledOn(String color) {
     if (color == "white"){
@@ -710,6 +792,23 @@ void ledOff(String color) {
 }
 
 void loop() {
+    // Detección de luz natural cada 10 segundos  -------------
+    static unsigned long ultimaVerificacion = 0;
+    if (millis() - ultimaVerificacion > 10000) {
+        ultimaVerificacion = millis();
+
+        if (esDeNoche() && !modoNoche) {
+            Serial.println("🌙 Detectada baja luz - Activando modo noche");
+            modoNoche = true;
+            configurarModoNoche();
+        } else if (!esDeNoche() && modoNoche) {
+            Serial.println("☀️ Buena luz detectada - Modo día");
+            modoNoche = false;
+            setupCameraOptimized(false);
+        }
+    }
+    // -------------------------------------------------------
+
   if (bluetoothEnabled && SerialBT.hasClient() && SerialBT.available()) {
     String command = SerialBT.readString();
     command.trim();
