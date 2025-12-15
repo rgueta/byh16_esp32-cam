@@ -25,9 +25,9 @@ using namespace eloq;   // ← SIN ESTO, "camera" NO EXISTE
 
 // Pin del botón físico
 #define BUTTON_PIN 12
-#define FLASH_PIN        4     // LED Flash/Linterna
+#define FLASH_PIN  4     // LED Flash/Linterna
 #define LED_ROJO 33  // LED rojo en algunas versiones
-#define LDR_PIN 16 // Pin para sensor de luz
+#define LDR_PIN 13   // Pin para sensor de luz
 
 
 // Configuración WiFi
@@ -65,7 +65,7 @@ bool flashActivado = false;  // Para controlar el flash
 void setupWiFi();
 bool setupCameraHD();
 bool setupSDCard();
-bool setupCameraOptimized();
+bool setupCameraOptimized(bool);
 void flushCameraBuffer();
 void ledOn(String color);
 void ledOff(String color);
@@ -76,15 +76,19 @@ void applyBrightnessSettings();
 void ajustarBrilloCamara(bool exterior);
 // -----------------------------------
 
+void configurarModoNoche();
+void configurarModoDia();
+void liberarGpio(uint8_t pin);
 
 bool esDeNoche() {
     // Leer sensor de luz (LDR)
     int valorLuz = analogRead(LDR_PIN);
     Serial.printf("📊 Sensor luz: %d\n", valorLuz);
+    SerialBT.printf("📊 Sensor luz: %d\n", valorLuz);
 
     // Umbral para determinar si es de noche
     // Ajusta este valor según tus condiciones
-    if (valorLuz < 500) {  // Menos de 500 = oscuro
+    if (valorLuz < 400) {  // Menos de 500 = oscuro
         return true;
     }
     return false;
@@ -109,6 +113,9 @@ void setup() {
   digitalWrite(FLASH_PIN, LOW); // Asegurar que el flash esté apagado al inicio
   digitalWrite(LED_ROJO, HIGH); // Asegurar que el led rojo esté apagado al inicio
 
+  // Configurar pin del sensor de luz como entrada
+    pinMode(LDR_PIN, INPUT);
+
   // Bluetooth - Solo si hay suficiente memoria
   if (bluetoothEnabled) {
     if (!SerialBT.begin(deviceName)) {
@@ -126,11 +133,25 @@ void setup() {
   }
 
 
+  // DETECCIÓN INICIAL DE LUZ para configurar la cámara
+  int valorLuzInicial = analogRead(LDR_PIN);
+  Serial.printf("📊 Luz inicial: %d\n", valorLuzInicial);
+  SerialBT.printf("📊 Luz inicial: %d\n", valorLuzInicial);
+
+  // Determinar si es de noche basado en el sensor
+  modoNoche = esDeNoche();
+
   // Cámara HD - Calidad reducida para evitar problemas
   Serial.println("📷 Inicializando cámara optimizada...");
-  if (!setupCameraOptimized()) {
+  if (!setupCameraOptimized(modoNoche)) {
     Serial.println("❌ Error en cámara!");
     return;
+  }
+
+  if(modoNoche){
+      flashActivado = true;
+      Serial.println("⚡ Flash automático activado para modo noche");
+      SerialBT.println("⚡ Flash automático activado para modo noche");
   }
 
   // SD Card
@@ -162,7 +183,8 @@ String generarNombreUnico() {
     preferences.putInt("contador", contador);
     preferences.end();
 
-    return "/fotos/" + String(contador) + ".jpg";
+    return "/fotos/" + String((modoNoche ? "noche_" : "dia_")) +
+    String(contador) + ".jpg";
 }
 
 void setupWiFi() {
@@ -185,7 +207,7 @@ void setupWiFi() {
   Serial.println("\n❌ Error en WiFi");
 }
 
-bool setupCameraOptimized() {
+bool setupCameraOptimized(bool noche = false) {
   camera_config_t config;
 
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -213,9 +235,14 @@ bool setupCameraOptimized() {
   // Configuración OPTIMIZADA - Menos calidad para fotos más pequeñas
   config.pixel_format = PIXFORMAT_JPEG;
 
-  // Perfil: EXTERIOR DIURNO
-  config.frame_size = FRAMESIZE_HD; // 1280x720
-  config.jpeg_quality = 4; // Calidad alta
+  // Si es modo noche, usar resolución más baja para más luz
+  if (noche) {
+    config.frame_size = FRAMESIZE_VGA;    // 640x480 - mejor para baja luz
+    config.jpeg_quality = 8;              // Calidad media (menos compresión)
+  } else {
+    config.frame_size = FRAMESIZE_HD;     // 1280x720 - normal
+    config.jpeg_quality = 4;              // Calidad alta
+  }
 
   // config.frame_size = FRAMESIZE_XGA; // 1024x768
   // config.jpeg_quality = 4; // Calidad alta
@@ -233,6 +260,11 @@ bool setupCameraOptimized() {
   }
 
   Serial.printf("✅ Cámara optimizada lista. Memoria: %d bytes\n", ESP.getFreeHeap());
+
+  // Aplicar configuración de noche si es necesario
+if (noche) {
+    configurarModoNoche();
+}
 
   return true;
 }
@@ -490,7 +522,10 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
     // ACTIVAR FLASH SI ESTÁ EN MODO NOCHE
     if (modoNoche && flashActivado) {
         Serial.println("⚡ Activando flash...");
-        digitalWrite(FLASH_PIN, HIGH);
+        // digitalWrite(FLASH_PIN, HIGH);
+        // liberarGpio(4);
+        // pinMode(FLASH_PIN, OUTPUT);
+        ledOn("white");
         delay(50);  // Pequeño delay para que el flash se estabilice
     }
 
@@ -508,7 +543,7 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
     }
     delay(100); // Pequeña pausa para estabilización
 
-
+    String nombre = generarNombreUnico().c_str();
 
     // CAPTURA USANDO ELOQUENT (NO uses esp_camera_fb_get() directamente)
     if (!camera.capture().isOk()) {
@@ -523,22 +558,24 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
 
     // APAGAR FLASH INMEDIATAMENTE DESPUÉS DE CAPTURAR
     if (modoNoche && flashActivado) {
-        digitalWrite(FLASH_PIN, LOW);
+        // digitalWrite(FLASH_PIN, LOW);
+        ledOff("white");
         Serial.println("⚡ Flash apagado");
+        // liberarGpio(4);
+        // pinMode(LDR_PIN, INPUT);
+        // pinMode(FLASH_PIN, OUTPUT);
     }
 
     // Ahora el frame está en camera.frame (seguro y limpio)
     Serial.printf("Foto capturada: %d bytes\n", camera.frame->len);
     Serial.printf("Memoria tras captura: %d bytes\n", ESP.getFreeHeap());
 
+
+
     // GUARDAR EN SD (si se solicita)
     if (saveToSD) {
-        char filename[32];
-        // sprintf(filename, "/fotos/IMG_%04d.jpg", photoCounter);
-        sprintf(filename, generarNombreUnico().c_str(), photoCounter);
-
-        if (sdmmc.save(camera.frame).to(filename).isOk()) {
-            Serial.println("Foto guardada en SD: " + String(filename));
+        if (sdmmc.save(camera.frame).to(nombre).isOk()) {
+            Serial.println("Foto guardada en SD: " + nombre);
         } else {
             Serial.println("Error al guardar en SD");
         }
@@ -567,6 +604,24 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
 
     Serial.printf("Memoria final: %d bytes\n", ESP.getFreeHeap());
     Serial.println("Proceso completado\n");
+
+    if(modoNoche){
+    // Configurar pin del sensor de luz como entrada
+      pinMode(LDR_PIN, INPUT);
+    }
+}
+
+void liberarGpio(uint8_t pin) {
+    // Desdetach cualquier interrupción
+    // detachInterrupt(digitalPinToInterrupt(pin));
+
+    // Poner el pin en estado "neutral"
+    // pinMode(pin, INPUT);
+    // digitalWrite(pin, LOW);
+
+    // En ESP32 Arduino también puedes:
+    gpio_reset_pin((gpio_num_t)pin);
+
 }
 
 void flushCameraBuffer() {
@@ -774,6 +829,63 @@ void configurarModoNoche() {
     Serial.println("📝 Parámetros: Exp=1200, Ganancia=30, Brillo=2");
 }
 
+void configurarModoDia() {
+    sensor_t *s = esp_camera_sensor_get();
+
+    if (s == NULL) {
+        Serial.println("Error: No se pudo obtener sensor para modo día");
+        return;
+    }
+
+    Serial.println("☀️ Configurando cámara para MODO DÍA...");
+
+    // 1. RESET a valores por defecto
+    s->set_reg(s, 0xFF, 0x01, 0x01);
+    delay(100);
+
+    // 2. Configuración óptima para luz normal
+    s->set_gain_ctrl(s, 1);       // Control de ganancia ON (automático)
+    s->set_exposure_ctrl(s, 1);   // Control de exposición ON (automático)
+    s->set_aec2(s, 1);            // AEC2 ON (mejor para exteriores con luz)
+
+    // 3. Exposición media para luz normal
+    s->set_aec_value(s, 800);     // Exposición media (ajustable)
+
+    // 4. Ganancia automática pero limitada
+    s->set_agc_gain(s, 10);       // Ganancia media (0-30)
+
+    // 5. Ajustes de imagen para luz natural
+    s->set_brightness(s, 0);      // Brillo neutral
+    s->set_contrast(s, 0);        // Contraste normal
+    s->set_saturation(s, 0);      // Saturación normal
+
+    // 6. White Balance automático
+    s->set_whitebal(s, 1);        // Auto white balance ON
+    s->set_awb_gain(s, 1);        // Ganancia AWB activada
+
+    // 7. Frame size más grande para mejor calidad
+    s->set_framesize(s, FRAMESIZE_HD);  // 1280x720 (HD)
+
+    // 8. Calidad JPEG alta
+    s->set_quality(s, 4);         // Calidad alta (1-63, menor es mejor)
+
+    // 9. Mejoras de imagen
+    s->set_bpc(s, 1);             // Corrección de píxeles negros ON
+    s->set_wpc(s, 1);             // Corrección de píxeles blancos ON
+    s->set_raw_gma(s, 1);         // Gamma correction ON
+    s->set_lenc(s, 1);            // Lensa correction ON
+
+    // 10. Configuraciones específicas
+    s->set_special_effect(s, 0);  // Sin efecto especial
+    s->set_dcw(s, 1);             // Downsize enable ON
+    s->set_ae_level(s, 0);        // Nivel exposición medio
+
+    delay(200); // Esperar que se apliquen los cambios
+
+    Serial.println("✅ Modo día configurado");
+    Serial.println("📝 Parámetros: Exp=800, Ganancia=10, Brillo=0, HD 1280x720");
+}
+
 void ledOn(String color) {
     if (color == "white"){
         digitalWrite(FLASH_PIN, HIGH);
@@ -794,17 +906,23 @@ void ledOff(String color) {
 void loop() {
     // Detección de luz natural cada 10 segundos  -------------
     static unsigned long ultimaVerificacion = 0;
-    if (millis() - ultimaVerificacion > 10000) {
+    if (millis() - ultimaVerificacion > 30000) {
         ultimaVerificacion = millis();
 
         if (esDeNoche() && !modoNoche) {
             Serial.println("🌙 Detectada baja luz - Activando modo noche");
+            SerialBT.println("🌙 Detectada baja luz - Activando modo noche");
             modoNoche = true;
+            flashActivado = true;
             configurarModoNoche();
+            setupCameraOptimized(modoNoche);
         } else if (!esDeNoche() && modoNoche) {
             Serial.println("☀️ Buena luz detectada - Modo día");
+            SerialBT.println("☀️ Buena luz detectada - Modo día");
             modoNoche = false;
-            setupCameraOptimized(false);
+            flashActivado = false;
+            configurarModoDia();
+            setupCameraOptimized(modoNoche);
         }
     }
     // -------------------------------------------------------
