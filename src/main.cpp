@@ -10,6 +10,8 @@
 #include "esp_bt_device.h"
 #include <WiFi.h>
 #include <Preferences.h>
+#include <cmath>
+#include <cstddef>
 
 Preferences preferences;
 
@@ -65,7 +67,7 @@ bool flashActivado = false;  // Para controlar el flash
 void setupWiFi();
 bool setupCameraHD();
 bool setupSDCard();
-bool setupCameraOptimized(bool);
+bool setupCameraOptimized();
 void flushCameraBuffer();
 void ledOn(String color);
 void ledOff(String color);
@@ -79,20 +81,11 @@ void ajustarBrilloCamara(bool exterior);
 void configurarModoNoche();
 void configurarModoDia();
 void liberarGpio(uint8_t pin);
+void configurarModo();
+bool esDeNoche();
 
-bool esDeNoche() {
-    sensor_t * s = esp_camera_sensor_get();
-
-     int gain = s->status.agc_gain;   // ganancia automática
-     int exp  = s->status.aec_value;  // exposición
-
-     // Ajusta estos valores según pruebas reales
-     if (gain > 8 || exp > 1200) {
-       return true;   // poca luz
-     }
-
-     return false;    // suficiente luz
-}
+void configurarModoNoche_old();
+void configurarModoDia_old();
 
 String getBluetoothMAC();
 
@@ -113,12 +106,12 @@ void setup() {
   digitalWrite(FLASH_PIN, LOW); // Asegurar que el flash esté apagado al inicio
   digitalWrite(LED_ROJO, HIGH); // Asegurar que el led rojo esté apagado al inicio
 
-// LDR como analógico (no necesita pinMode)
+  // LDR como analógico (no necesita pinMode)
   // analogReadResolution(12);
   // Configurar pin del sensor de luz como entrada
-    // pinMode(LDR_PIN, INPUT); // GROK dice: LDR sensor como analógico (no necesita pinMode)
-    // pinMode(LDR_PIN, INPUT_PULLUP);
-    delay(100);
+  // pinMode(LDR_PIN, INPUT); // GROK dice: LDR sensor como analógico (no necesita pinMode)
+  // pinMode(LDR_PIN, INPUT_PULLUP);
+  // delay(100);
 
   // Bluetooth - Solo si hay suficiente memoria
   if (bluetoothEnabled) {
@@ -151,9 +144,11 @@ void setup() {
 
   // Cámara HD - Calidad reducida para evitar problemas
   Serial.println("📷 Inicializando cámara optimizada...");
-  if (!setupCameraOptimized(modoNoche)) {
+  if (!setupCameraOptimized()) {
     Serial.println("❌ Error en cámara!");
     return;
+  }else{
+      modoNoche = esDeNoche();
   }
 
   if(modoNoche){
@@ -182,6 +177,21 @@ void setup() {
 
   ledOn("white");
   ledOff("white");
+}
+
+bool esDeNoche() {
+    sensor_t * s = esp_camera_sensor_get();
+
+     int gain = s->status.agc_gain;   // ganancia automática
+     int exp  = s->status.aec_value;  // exposición
+
+     // Ajusta estos valores según pruebas reales
+     // if (gain > 8 || exp > 1200) {
+     if (gain >= 12 && exp >= 1600) {
+       return true;   // poca luz
+     }
+
+     return false;    // suficiente luz
 }
 
 String generarNombreUnico() {
@@ -215,9 +225,8 @@ void setupWiFi() {
   Serial.println("\n❌ Error en WiFi");
 }
 
-bool setupCameraOptimized(bool noche = false) {
+bool setupCameraOptimized() {
   camera_config_t config;
-  sensor_t * s = esp_camera_sensor_get();
 
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -244,35 +253,9 @@ bool setupCameraOptimized(bool noche = false) {
   // Configuración OPTIMIZADA - Menos calidad para fotos más pequeñas
   config.pixel_format = PIXFORMAT_JPEG;
 
-  // Si es modo noche, usar resolución más baja para más luz
-  if (noche) {
-    config.frame_size = FRAMESIZE_VGA;    // 640x480 - mejor para baja luz
-    config.jpeg_quality = 8;              // Calidad media (menos compresión)
+  config.frame_size = FRAMESIZE_HD;     // 1280x720 - normal
+  config.jpeg_quality = 4;
 
-    s->set_framesize(s, FRAMESIZE_VGA);
-    s->set_brightness(s, 1);
-    s->set_contrast(s, 1);
-    s->set_saturation(s, -1);
-    s->set_gainceiling(s, GAINCEILING_16X);
-    s->set_exposure_ctrl(s, 1);
-    s->set_gain_ctrl(s, 1);
-    s->set_whitebal(s, 1);
-
-  } else {
-    config.frame_size = FRAMESIZE_HD;     // 1280x720 - normal
-    config.jpeg_quality = 4;              // Calidad alta
-
-    s->set_framesize(s, FRAMESIZE_HD);
-    s->set_brightness(s, 0);
-    s->set_contrast(s, 0);
-    s->set_saturation(s, 0);
-    s->set_gainceiling(s, GAINCEILING_4X);
-    s->set_exposure_ctrl(s, 1);
-    s->set_gain_ctrl(s, 1);
-    s->set_whitebal(s, 1);
-  }
-
-  Serial.printf("GAIN=%d  EXP=%d\n", s->status.agc_gain, s->status.aec_value);
 
   // config.frame_size = FRAMESIZE_XGA; // 1024x768
   // config.jpeg_quality = 4; // Calidad alta
@@ -548,7 +531,9 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
 
 
     modoNoche = esDeNoche();
-    setupCameraOptimized(modoNoche);
+    configurarModo();
+    delay(100);
+    // setupCameraOptimized(modoNoche);
 
     // LIMPIAR BUFFER ANTES DE CAPTURAR (crucial!)
     flushCameraBuffer();
@@ -616,6 +601,7 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
     if (saveToSD) {
         if (sdmmc.save(camera.frame).to(nombre).isOk()) {
             Serial.println("Foto guardada en SD: " + nombre);
+            SerialBT.println("Foto guardada en SD: " + nombre);
         } else {
             String errorMessage = sdmmc.exception.toString();
             delay(50);
@@ -829,7 +815,42 @@ String getBluetoothMAC() {
 }
 
 // Función para configurar la cámara en modo NOCHE/BAJA LUZ
-void configurarModoNoche() {
+void configurarModo(){
+    // sensor_t *s = esp_camera_sensor_get();
+    // if(modoNoche){
+    //     Serial.println("🌙 Configurando cámara para MODO NOCHE...");
+    //     s->set_framesize(s, FRAMESIZE_VGA);
+    //     s->set_brightness(s, 1);
+    //     s->set_contrast(s, 1);
+    //     s->set_saturation(s, -1);
+    //     s->set_gainceiling(s, GAINCEILING_16X);
+    //     s->set_exposure_ctrl(s, 1);
+    //     s->set_gain_ctrl(s, 1);
+    //     s->set_whitebal(s, 1);
+    //     Serial.printf("GAIN=%d  EXP=%d\n", s->status.agc_gain, s->status.aec_value);
+
+    // }else{
+    //     Serial.println("☀️ Configurando cámara para MODO DÍA...");
+    //     s->set_framesize(s, FRAMESIZE_HD);
+    //     s->set_brightness(s, 0);
+    //     s->set_contrast(s, 0);
+    //     s->set_saturation(s, 0);
+    //     s->set_gainceiling(s, GAINCEILING_4X);
+    //     s->set_exposure_ctrl(s, 1);
+    //     s->set_gain_ctrl(s, 1);
+    //     s->set_whitebal(s, 1);
+    //     Serial.printf("GAIN=%d  EXP=%d\n", s->status.agc_gain, s->status.aec_value);
+
+    // }
+    //
+    if(modoNoche){
+        configurarModoNoche_old();
+    }else{
+        configurarModoDia_old();
+    }
+}
+
+void configurarModoNoche_old() {
     sensor_t *s = esp_camera_sensor_get();
 
     if (s == NULL) {
@@ -879,7 +900,7 @@ void configurarModoNoche() {
     Serial.println("📝 Parámetros: Exp=1200, Ganancia=30, Brillo=2");
 }
 
-void configurarModoDia() {
+void configurarModoDia_old() {
     sensor_t *s = esp_camera_sensor_get();
 
     if (s == NULL) {
