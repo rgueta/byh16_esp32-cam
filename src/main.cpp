@@ -27,7 +27,7 @@ using namespace eloq;   // ← SIN ESTO, "camera" NO EXISTE
 #define BUTTON_PIN 12
 #define FLASH_PIN  4     // LED Flash/Linterna
 #define LED_ROJO 33  // LED rojo en algunas versiones
-#define LDR_PIN 13   // Pin para sensor de luz
+// #define LDR_PIN  0  // Pin para sensor de luz
 
 
 // Configuración WiFi
@@ -81,17 +81,17 @@ void configurarModoDia();
 void liberarGpio(uint8_t pin);
 
 bool esDeNoche() {
-    // Leer sensor de luz (LDR)
-    int valorLuz = analogRead(LDR_PIN);
-    Serial.printf("📊 Sensor luz: %d\n", valorLuz);
-    SerialBT.printf("📊 Sensor luz: %d\n", valorLuz);
+    sensor_t * s = esp_camera_sensor_get();
 
-    // Umbral para determinar si es de noche
-    // Ajusta este valor según tus condiciones
-    if (valorLuz < 400) {  // Menos de 500 = oscuro
-        return true;
-    }
-    return false;
+     int gain = s->status.agc_gain;   // ganancia automática
+     int exp  = s->status.aec_value;  // exposición
+
+     // Ajusta estos valores según pruebas reales
+     if (gain > 8 || exp > 1200) {
+       return true;   // poca luz
+     }
+
+     return false;    // suficiente luz
 }
 
 String getBluetoothMAC();
@@ -113,8 +113,12 @@ void setup() {
   digitalWrite(FLASH_PIN, LOW); // Asegurar que el flash esté apagado al inicio
   digitalWrite(LED_ROJO, HIGH); // Asegurar que el led rojo esté apagado al inicio
 
+// LDR como analógico (no necesita pinMode)
+  // analogReadResolution(12);
   // Configurar pin del sensor de luz como entrada
-    pinMode(LDR_PIN, INPUT);
+    // pinMode(LDR_PIN, INPUT); // GROK dice: LDR sensor como analógico (no necesita pinMode)
+    // pinMode(LDR_PIN, INPUT_PULLUP);
+    delay(100);
 
   // Bluetooth - Solo si hay suficiente memoria
   if (bluetoothEnabled) {
@@ -128,18 +132,22 @@ void setup() {
   }
 
   // WiFi
+  WiFi.mode(WIFI_OFF);
+  delay(100);
   if(wifiEnabled){
       setupWiFi();
   }
 
 
   // DETECCIÓN INICIAL DE LUZ para configurar la cámara
-  int valorLuzInicial = analogRead(LDR_PIN);
-  Serial.printf("📊 Luz inicial: %d\n", valorLuzInicial);
-  SerialBT.printf("📊 Luz inicial: %d\n", valorLuzInicial);
+  // int valorLuzInicial = analogRead(LDR_PIN);
+
+
+  // Serial.printf("📊 Luz inicial: %d\n", valorLuzInicial);
+  // SerialBT.printf("📊 Luz inicial: %d\n", valorLuzInicial);
 
   // Determinar si es de noche basado en el sensor
-  modoNoche = esDeNoche();
+  // modoNoche = esDeNoche();
 
   // Cámara HD - Calidad reducida para evitar problemas
   Serial.println("📷 Inicializando cámara optimizada...");
@@ -209,6 +217,7 @@ void setupWiFi() {
 
 bool setupCameraOptimized(bool noche = false) {
   camera_config_t config;
+  sensor_t * s = esp_camera_sensor_get();
 
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -239,10 +248,31 @@ bool setupCameraOptimized(bool noche = false) {
   if (noche) {
     config.frame_size = FRAMESIZE_VGA;    // 640x480 - mejor para baja luz
     config.jpeg_quality = 8;              // Calidad media (menos compresión)
+
+    s->set_framesize(s, FRAMESIZE_VGA);
+    s->set_brightness(s, 1);
+    s->set_contrast(s, 1);
+    s->set_saturation(s, -1);
+    s->set_gainceiling(s, GAINCEILING_16X);
+    s->set_exposure_ctrl(s, 1);
+    s->set_gain_ctrl(s, 1);
+    s->set_whitebal(s, 1);
+
   } else {
     config.frame_size = FRAMESIZE_HD;     // 1280x720 - normal
     config.jpeg_quality = 4;              // Calidad alta
+
+    s->set_framesize(s, FRAMESIZE_HD);
+    s->set_brightness(s, 0);
+    s->set_contrast(s, 0);
+    s->set_saturation(s, 0);
+    s->set_gainceiling(s, GAINCEILING_4X);
+    s->set_exposure_ctrl(s, 1);
+    s->set_gain_ctrl(s, 1);
+    s->set_whitebal(s, 1);
   }
+
+  Serial.printf("GAIN=%d  EXP=%d\n", s->status.agc_gain, s->status.aec_value);
 
   // config.frame_size = FRAMESIZE_XGA; // 1024x768
   // config.jpeg_quality = 4; // Calidad alta
@@ -262,9 +292,9 @@ bool setupCameraOptimized(bool noche = false) {
   Serial.printf("✅ Cámara optimizada lista. Memoria: %d bytes\n", ESP.getFreeHeap());
 
   // Aplicar configuración de noche si es necesario
-if (noche) {
-    configurarModoNoche();
-}
+// if (noche) {
+//     configurarModoNoche();
+// }
 
   return true;
 }
@@ -515,6 +545,11 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
     Serial.printf("\nTOMANDO FOTO #%d\n", photoCounter);
     Serial.printf("Memoria antes: %d bytes\n", ESP.getFreeHeap());
 
+
+
+    modoNoche = esDeNoche();
+    setupCameraOptimized(modoNoche);
+
     // LIMPIAR BUFFER ANTES DE CAPTURAR (crucial!)
     flushCameraBuffer();
     delay(100);  // Estabilización
@@ -539,7 +574,11 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
         // Liberar el frame de descarte inmediatamente
         flushCameraBuffer();
     } else {
-        Serial.println("⚠️ Fallo el disparo de descarte. Intentando continuar.");
+        Serial.println("⚠️ Fallo el disparo de descarte: " + camera.exception.toString());
+        if(flashActivado){
+            flashActivado = false;
+            ledOff("white");
+        }
     }
     delay(100); // Pequeña pausa para estabilización
 
@@ -561,6 +600,7 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
         // digitalWrite(FLASH_PIN, LOW);
         ledOff("white");
         Serial.println("⚡ Flash apagado");
+        flashActivado = false;
         // liberarGpio(4);
         // pinMode(LDR_PIN, INPUT);
         // pinMode(FLASH_PIN, OUTPUT);
@@ -577,7 +617,17 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
         if (sdmmc.save(camera.frame).to(nombre).isOk()) {
             Serial.println("Foto guardada en SD: " + nombre);
         } else {
-            Serial.println("Error al guardar en SD");
+            String errorMessage = sdmmc.exception.toString();
+            delay(50);
+            if (errorMessage.length() > 0) {
+                Serial.println("❌ Error al guardar en SD: " + errorMessage);
+            } else {
+                // Este es el caso cuando la excepción es vacía pero !isOk() es true
+                Serial.println("❌ Error al guardar en SD: Fallo desconocido (Excepción vacía).");
+                Serial.println("Verifique que la carpeta /fotos exista y que la SD no esté llena.");
+            }
+
+
         }
     }
 
@@ -607,7 +657,7 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
 
     if(modoNoche){
     // Configurar pin del sensor de luz como entrada
-      pinMode(LDR_PIN, INPUT);
+      // pinMode(LDR_PIN, INPUT);
     }
 }
 
@@ -905,26 +955,26 @@ void ledOff(String color) {
 
 void loop() {
     // Detección de luz natural cada 10 segundos  -------------
-    static unsigned long ultimaVerificacion = 0;
-    if (millis() - ultimaVerificacion > 30000) {
-        ultimaVerificacion = millis();
+    // static unsigned long ultimaVerificacion = 0;
+    // if (millis() - ultimaVerificacion > 30000) {
+    //     ultimaVerificacion = millis();
 
-        if (esDeNoche() && !modoNoche) {
-            Serial.println("🌙 Detectada baja luz - Activando modo noche");
-            SerialBT.println("🌙 Detectada baja luz - Activando modo noche");
-            modoNoche = true;
-            flashActivado = true;
-            configurarModoNoche();
-            setupCameraOptimized(modoNoche);
-        } else if (!esDeNoche() && modoNoche) {
-            Serial.println("☀️ Buena luz detectada - Modo día");
-            SerialBT.println("☀️ Buena luz detectada - Modo día");
-            modoNoche = false;
-            flashActivado = false;
-            configurarModoDia();
-            setupCameraOptimized(modoNoche);
-        }
-    }
+    //     if (esDeNoche() && !modoNoche) {
+    //         Serial.println("🌙 Detectada baja luz - Activando modo noche");
+    //         SerialBT.println("🌙 Detectada baja luz - Activando modo noche");
+    //         modoNoche = true;
+    //         flashActivado = true;
+    //         configurarModoNoche();
+    //         setupCameraOptimized(modoNoche);
+    //     } else if (!esDeNoche() && modoNoche) {
+    //         Serial.println("☀️ Buena luz detectada - Modo día");
+    //         SerialBT.println("☀️ Buena luz detectada - Modo día");
+    //         modoNoche = false;
+    //         flashActivado = false;
+    //         configurarModoDia();
+    //         setupCameraOptimized(modoNoche);
+    //     }
+    // }
     // -------------------------------------------------------
 
   if (bluetoothEnabled && SerialBT.hasClient() && SerialBT.available()) {
