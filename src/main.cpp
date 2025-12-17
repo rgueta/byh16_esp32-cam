@@ -80,7 +80,6 @@ void ajustarBrilloCamara(bool exterior);
 
 void configurarModoNoche();
 void configurarModoDia();
-void liberarGpio(uint8_t pin);
 void configurarModo();
 bool esDeNoche();
 
@@ -105,14 +104,6 @@ void setup() {
   pinMode(LED_ROJO, OUTPUT);
   digitalWrite(FLASH_PIN, LOW); // Asegurar que el flash esté apagado al inicio
   digitalWrite(LED_ROJO, HIGH); // Asegurar que el led rojo esté apagado al inicio
-
-  // LDR como analógico (no necesita pinMode)
-  // analogReadResolution(12);
-  // Configurar pin del sensor de luz como entrada
-  // pinMode(LDR_PIN, INPUT); // GROK dice: LDR sensor como analógico (no necesita pinMode)
-  // pinMode(LDR_PIN, INPUT_PULLUP);
-  // delay(100);
-
   // Bluetooth - Solo si hay suficiente memoria
   if (bluetoothEnabled) {
     if (!SerialBT.begin(deviceName)) {
@@ -124,23 +115,12 @@ void setup() {
     }
   }
 
-  // WiFi
+  // WiFi  ---------
   WiFi.mode(WIFI_OFF);
   delay(100);
   if(wifiEnabled){
       setupWiFi();
   }
-
-
-  // DETECCIÓN INICIAL DE LUZ para configurar la cámara
-  // int valorLuzInicial = analogRead(LDR_PIN);
-
-
-  // Serial.printf("📊 Luz inicial: %d\n", valorLuzInicial);
-  // SerialBT.printf("📊 Luz inicial: %d\n", valorLuzInicial);
-
-  // Determinar si es de noche basado en el sensor
-  // modoNoche = esDeNoche();
 
   // Cámara HD - Calidad reducida para evitar problemas
   Serial.println("📷 Inicializando cámara optimizada...");
@@ -528,8 +508,6 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
     Serial.printf("\nTOMANDO FOTO #%d\n", photoCounter);
     Serial.printf("Memoria antes: %d bytes\n", ESP.getFreeHeap());
 
-
-
     modoNoche = esDeNoche();
     configurarModo();
     delay(100);
@@ -542,9 +520,6 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
     // ACTIVAR FLASH SI ESTÁ EN MODO NOCHE
     if (modoNoche && flashActivado) {
         Serial.println("⚡ Activando flash...");
-        // digitalWrite(FLASH_PIN, HIGH);
-        // liberarGpio(4);
-        // pinMode(FLASH_PIN, OUTPUT);
         ledOn("white");
         delay(50);  // Pequeño delay para que el flash se estabilice
     }
@@ -586,16 +561,11 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
         ledOff("white");
         Serial.println("⚡ Flash apagado");
         flashActivado = false;
-        // liberarGpio(4);
-        // pinMode(LDR_PIN, INPUT);
-        // pinMode(FLASH_PIN, OUTPUT);
     }
 
     // Ahora el frame está en camera.frame (seguro y limpio)
     Serial.printf("Foto capturada: %d bytes\n", camera.frame->len);
     Serial.printf("Memoria tras captura: %d bytes\n", ESP.getFreeHeap());
-
-
 
     // GUARDAR EN SD (si se solicita)
     if (saveToSD) {
@@ -640,23 +610,6 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
 
     Serial.printf("Memoria final: %d bytes\n", ESP.getFreeHeap());
     Serial.println("Proceso completado\n");
-
-    if(modoNoche){
-    // Configurar pin del sensor de luz como entrada
-      // pinMode(LDR_PIN, INPUT);
-    }
-}
-
-void liberarGpio(uint8_t pin) {
-    // Desdetach cualquier interrupción
-    // detachInterrupt(digitalPinToInterrupt(pin));
-
-    // Poner el pin en estado "neutral"
-    // pinMode(pin, INPUT);
-    // digitalWrite(pin, LOW);
-
-    // En ESP32 Arduino también puedes:
-    gpio_reset_pin((gpio_num_t)pin);
 
 }
 
@@ -772,21 +725,6 @@ void processBluetoothCommand(String command) {
       SerialBT.println("🔧 Calidad reducida a 22 para fotos más pequeñas");
     }
   }
-  else if (command == "OBSCURO"){
-      LowBrightness = !LowBrightness;
-      Serial.printf("LowBrightness: %s\n", (LowBrightness ? "True" : "False"));
-      SerialBT.printf("LowBrightness: %s\n", (LowBrightness ? "True" : "False"));
-  }
-  else if (command == "EXTERIOR"){
-      modoBrillo = "Exterior";
-      SerialBT.printf("modoBrillo: %s\n", modoBrillo.c_str());
-      ajustarBrilloCamara(true);
-  }
-  else if (command == "INTERIOR"){
-      modoBrillo = "Interior";
-      SerialBT.printf("modoBrillo: %s\n", modoBrillo.c_str());
-      ajustarBrilloCamara(false);
-  }
   else if (command == "AYUDA"){
       SerialBT.printf("BT MAC: %s\n", btMAC.c_str());
       SerialBT.printf("LowBrightness: %s\n", (LowBrightness ? "True" : "False"));
@@ -794,7 +732,6 @@ void processBluetoothCommand(String command) {
   else {
     SerialBT.println("❌ Comando no reconocido");
     SerialBT.println("Comandos: FOTO, ENVIAR, POST, MEMORIA, CALIDAD,\n ");
-    SerialBT.println("OBSCURO, EXTERIOR, INTERIOR\n");
   }
 }
 
@@ -975,29 +912,6 @@ void ledOff(String color) {
 }
 
 void loop() {
-    // Detección de luz natural cada 10 segundos  -------------
-    // static unsigned long ultimaVerificacion = 0;
-    // if (millis() - ultimaVerificacion > 30000) {
-    //     ultimaVerificacion = millis();
-
-    //     if (esDeNoche() && !modoNoche) {
-    //         Serial.println("🌙 Detectada baja luz - Activando modo noche");
-    //         SerialBT.println("🌙 Detectada baja luz - Activando modo noche");
-    //         modoNoche = true;
-    //         flashActivado = true;
-    //         configurarModoNoche();
-    //         setupCameraOptimized(modoNoche);
-    //     } else if (!esDeNoche() && modoNoche) {
-    //         Serial.println("☀️ Buena luz detectada - Modo día");
-    //         SerialBT.println("☀️ Buena luz detectada - Modo día");
-    //         modoNoche = false;
-    //         flashActivado = false;
-    //         configurarModoDia();
-    //         setupCameraOptimized(modoNoche);
-    //     }
-    // }
-    // -------------------------------------------------------
-
   if (bluetoothEnabled && SerialBT.hasClient() && SerialBT.available()) {
     String command = SerialBT.readString();
     command.trim();
