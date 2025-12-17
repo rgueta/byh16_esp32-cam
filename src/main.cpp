@@ -82,6 +82,7 @@ void configurarModoNoche();
 void configurarModoDia();
 void configurarModo();
 bool esDeNoche();
+void actualizarLuzSensor();
 
 void configurarModoNoche_old();
 void configurarModoDia_old();
@@ -132,9 +133,10 @@ void setup() {
   }
 
   if(modoNoche){
-      flashActivado = true;
       Serial.println("⚡ Flash automático activado para modo noche");
       SerialBT.println("⚡ Flash automático activado para modo noche");
+  }else{
+      Serial.println("Modo Noche revisado, (es DIA * ) ");
   }
 
   // SD Card
@@ -159,20 +161,55 @@ void setup() {
   ledOff("white");
 }
 
-bool esDeNoche() {
+bool esDeNoche_1() {
     sensor_t * s = esp_camera_sensor_get();
 
-     int gain = s->status.agc_gain;   // ganancia automática
-     int exp  = s->status.aec_value;  // exposición
+     float gain = s->status.agc_gain;   // ganancia automática
+     float exp  = s->status.aec_value;  // exposición
+
+     Serial.printf("GAIN=%d  EXP=%d\n", s->status.agc_gain, s->status.aec_value);
+     SerialBT.printf("GAIN=%d  EXP=%d\n", s->status.agc_gain, s->status.aec_value);
 
      // Ajusta estos valores según pruebas reales
-     // if (gain > 8 || exp > 1200) {
      if (gain >= 12 && exp >= 1600) {
        return true;   // poca luz
      }
 
      return false;    // suficiente luz
 }
+
+bool esDeNoche() {
+
+  // Forzar actualización del sensor
+  actualizarLuzSensor();
+
+  sensor_t * s = esp_camera_sensor_get();
+
+  float gain = s->status.agc_gain;
+  float exp  = s->status.aec_value;
+
+  // normalizamos
+  float indice = (gain * 120.0f) + exp;
+  SerialBT.printf("📝 Parámetros: GAIN=%.2f, EXP=%.2f, INDICE=%.2f\n", gain, exp, indice);
+  Serial.printf("📝 Parámetros: GAIN=%.2f, EXP=%.2f, INDICE=%.2f\n", gain, exp, indice);
+
+  // Ajusta este umbral
+  if(indice > 1800){  // umbral realista exterior
+      flashActivado = true;
+      return true;
+  }else{
+      return false;
+  }
+}
+
+void actualizarLuzSensor() {
+  camera_fb_t * fb = esp_camera_fb_get();
+  if (fb) {
+    esp_camera_fb_return(fb);
+  }
+  delay(30);  // deja estabilizar
+}
+
 
 String generarNombreUnico() {
     preferences.begin("fotos", false);
@@ -252,12 +289,15 @@ bool setupCameraOptimized() {
     return false;
   }
 
+  sensor_t * s = esp_camera_sensor_get();
+  s->set_exposure_ctrl(s, 1);  // AEC ON
+  s->set_gain_ctrl(s, 1);      // AGC ON
+  s->set_aec2(s, 1);           // AEC avanzado
+  s->set_gainceiling(s, GAINCEILING_16X);
+
+
   Serial.printf("✅ Cámara optimizada lista. Memoria: %d bytes\n", ESP.getFreeHeap());
 
-  // Aplicar configuración de noche si es necesario
-// if (noche) {
-//     configurarModoNoche();
-// }
 
   return true;
 }
@@ -521,7 +561,7 @@ void captureProcessAndSend(bool saveToSD, bool sendToServer) {
     if (modoNoche && flashActivado) {
         Serial.println("⚡ Activando flash...");
         ledOn("white");
-        delay(50);  // Pequeño delay para que el flash se estabilice
+        delay(180);  // Pequeño delay para que el flash se estabilice
     }
 
     // =======================================================
@@ -641,6 +681,13 @@ void processBluetoothCommand(String command) {
   else if (command == "REBOOT") {
       ESP.restart();
   }
+  else if (command == "FLASH OFF") {
+      flashActivado = false;
+  }
+  else if (command == "FLASH ON") {
+      flashActivado = true;
+  }
+
   else if (command == "ENVIAR") {
     if (WiFi.status() != WL_CONNECTED) {
       SerialBT.println("❌ WiFi no conectado");
@@ -814,6 +861,7 @@ void configurarModoNoche_old() {
     s->set_aec_value(s, 1200);    // Exposición máxima (1200)
 
     // 4. Aumentar brillo y contraste para ver detalles
+    s->set_gainceiling(s, GAINCEILING_16X);
     s->set_brightness(s, 2);      // Brillo máximo (+2)
     s->set_contrast(s, 1);        // Contraste medio (+1)
     s->set_saturation(s, -1);     // Reducir saturación para menos ruido
@@ -834,7 +882,9 @@ void configurarModoNoche_old() {
     delay(200); // Esperar que se apliquen los cambios
 
     Serial.println("✅ Modo noche configurado");
-    Serial.println("📝 Parámetros: Exp=1200, Ganancia=30, Brillo=2");
+    // Serial.printf("GAIN=%d  EXP=%d\n", s->status.agc_gain, s->status.aec_value);
+    // SerialBT.printf("GAIN=%d  EXP=%d\n", s->status.agc_gain, s->status.aec_value);
+    // Serial.println("📝 Parámetros: Exp=1200, Ganancia=30, Brillo=2");
 }
 
 void configurarModoDia_old() {
@@ -863,6 +913,7 @@ void configurarModoDia_old() {
     s->set_agc_gain(s, 10);       // Ganancia media (0-30)
 
     // 5. Ajustes de imagen para luz natural
+    s->set_gainceiling(s, GAINCEILING_4X);
     s->set_brightness(s, 0);      // Brillo neutral
     s->set_contrast(s, 0);        // Contraste normal
     s->set_saturation(s, 0);      // Saturación normal
@@ -891,7 +942,9 @@ void configurarModoDia_old() {
     delay(200); // Esperar que se apliquen los cambios
 
     Serial.println("✅ Modo día configurado");
-    Serial.println("📝 Parámetros: Exp=800, Ganancia=10, Brillo=0, HD 1280x720");
+    // Serial.printf("GAIN=%d  EXP=%d\n", s->status.agc_gain, s->status.aec_value);
+    // SerialBT.printf("GAIN=%d  EXP=%d\n", s->status.agc_gain, s->status.aec_value);
+    // Serial.println("📝 Parámetros: Exp=800, Ganancia=10, Brillo=0, HD 1280x720");
 }
 
 void ledOn(String color) {
